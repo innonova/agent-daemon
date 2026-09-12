@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { LogIndex, SessionLog } from './session-log.js';
@@ -134,6 +135,28 @@ describe('SessionLog', () => {
     log.close();
     expect((await collect(file)).map((r) => r.seq)).toEqual([1, 3]);
     expect(await SessionLog.lastSeq(file)).toBe(3);
+  });
+
+  it('fills the tail range even when read() returns short', async () => {
+    const log = new SessionLog(file);
+    for (let i = 1; i <= 4; i++)
+      log.append({ seq: i, t: i, s: 'out', d: 'w'.repeat(30) });
+    log.close();
+    const realOpen = fsp.open;
+    const spy = vi
+      .spyOn(fsp, 'open')
+      .mockImplementation(async (...args: any[]) => {
+        const fh = await (realOpen as any)(...args);
+        const realRead = fh.read.bind(fh);
+        fh.read = (buf: Buffer, off: number, len: number, pos: number) =>
+          realRead(buf, off, Math.min(len, 7), pos);
+        return fh;
+      });
+    try {
+      expect(await SessionLog.lastSeq(file)).toBe(4);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('refuses to append after close', () => {

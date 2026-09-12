@@ -175,6 +175,18 @@ describe('starting sessions', () => {
     expect(fs.readdirSync(path.join(d.stateDir, 'sessions')).length).toBe(
       before,
     );
+    for (const bad of [
+      { type: 'session.get', id: 123 },
+      { type: 'session.detach', id: {} },
+      { type: 'session.input', id: null, data: 'x' },
+      { type: 'session.attach' },
+      { type: 'session.remove', id: ['x'] },
+    ]) {
+      expect(await c.request<any>(bad)).toMatchObject({
+        type: 'error',
+        code: 'invalid-request',
+      });
+    }
     const { id } = await startFake(c);
     expect(
       await c.request({ type: 'session.attach', id, replay: { fromSeq: 'x' } }),
@@ -535,19 +547,20 @@ describe('input and output', () => {
       if (reply.type === 'error') break;
       await sleep(20);
     }
-    expect(reply).toMatchObject({ type: 'error' });
-    expect(['stdin-error', 'stdin-closed']).toContain(reply.code);
-    if (reply.code === 'stdin-error') {
-      expect(
-        c
-          .outputs(id)
-          .some(
-            (f: any) =>
-              f.s === 'err' &&
-              f.d.startsWith('agent-daemon: stdin write failed'),
-          ),
-      ).toBe(true);
-    }
+    // the daemon cannot learn of the closed read end except by writing to
+    // it, so the first failure is always the write itself
+    expect(reply).toMatchObject({ type: 'error', code: 'stdin-error' });
+    expect(
+      c
+        .outputs(id)
+        .some(
+          (f: any) =>
+            f.s === 'err' && f.d.startsWith('agent-daemon: stdin write failed'),
+        ),
+    ).toBe(true);
+    expect(
+      await c.request({ type: 'session.input', id, data: 'x' }),
+    ).toMatchObject({ type: 'error', code: 'stdin-closed' });
     await c.request({ type: 'session.signal', id, signal: 'SIGKILL' });
   });
 
@@ -794,6 +807,10 @@ describe('replay', () => {
     const b = await connect();
     expect(
       await b.request({ type: 'session.attach', id, replay: true }),
+    ).toMatchObject({ type: 'error', code: 'replay-failed' });
+    // also when nothing would need reading: a cursor past the boundary
+    expect(
+      await b.request({ type: 'session.attach', id, replay: { fromSeq: 999 } }),
     ).toMatchObject({ type: 'error', code: 'replay-failed' });
     await a.request({
       type: 'session.input',
@@ -1136,6 +1153,76 @@ describe('daemon restart', () => {
           /* gone */
         }
       }
+      await d2.stop();
+    }
+  });
+
+  it('refuses replay while the boundary is unverified and recovers it later', async () => {
+    const dirs = makeDirs();
+    const sessionsDir = path.join(dirs.stateDir, 'sessions');
+    const dir = path.join(sessionsDir, 'unverified');
+    fs.mkdirSync(dir, { recursive: true });
+    const record = {
+      id: 'unverified',
+      profile: 'fake',
+      label: null,
+      command: 'x',
+      args: [],
+      cwd: '/',
+      env: {},
+      loginShell: false,
+      pid: 1,
+      state: 'exited',
+      exitCode: null,
+      signal: null,
+      exitReason: 'daemon-restart',
+      startedAt: 1,
+      exitedAt: 2,
+      lastSeq: 0,
+      lastSeqUnverified: true,
+    };
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify(record));
+    const logPath = path.join(dir, 'log.ndjson');
+    fs.writeFileSync(
+      logPath,
+      '{"seq":1,"t":1,"s":"out","d":"a"}\n{"seq":2,"t":2,"s":"out","d":"b"}\n',
+    );
+    fs.chmodSync(logPath, 0o000); // unreadable at boot: recovery must fail, not guess
+    const d2 = await startDaemon({ dirs });
+    try {
+      const c = await Client.connect(d2.url);
+      const before = await c.request<any>({
+        type: 'session.get',
+        id: 'unverified',
+      });
+      expect(before.session).toMatchObject({
+        lastSeq: 0,
+        lastSeqUnverified: true,
+      });
+      expect(
+        await c.request({
+          type: 'session.attach',
+          id: 'unverified',
+          replay: true,
+        }),
+      ).toMatchObject({ type: 'error', code: 'replay-failed' });
+      fs.chmodSync(logPath, 0o600); // storage recovers
+      const attached = await c.request<any>({
+        type: 'session.attach',
+        id: 'unverified',
+        replay: true,
+      });
+      expect(attached).toMatchObject({ type: 'session.attached', lastSeq: 2 });
+      expect(attached.session.lastSeqUnverified).toBeUndefined();
+      expect((c.outputs('unverified') as any[]).map((f) => f.d)).toEqual([
+        'a',
+        'b',
+      ]);
+      expect(
+        JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')),
+      ).toMatchObject({ lastSeq: 2 });
+      await c.close();
+    } finally {
       await d2.stop();
     }
   });

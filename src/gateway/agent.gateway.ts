@@ -379,6 +379,15 @@ export class AgentGateway
 
     if (!replay) return session.record.lastSeq;
 
+    try {
+      await session.ensureReplayable();
+    } catch (err) {
+      if (!alive()) return null;
+      this.detach(client, id);
+      throw err;
+    }
+    if (!alive()) return null;
+
     let next = replay === true ? 1 : Math.max(1, replay.fromSeq);
     let lastSent = Math.min(next - 1, session.record.lastSeq);
     try {
@@ -464,6 +473,20 @@ export class AgentGateway
   ): void {
     const ref = f?.ref;
     const id = (f as { id?: unknown })?.id;
+    const type = (f as { type?: unknown })?.type;
+    const needsId =
+      typeof type === 'string' &&
+      type.startsWith('session.') &&
+      type !== 'session.start';
+    if (needsId && typeof id !== 'string') {
+      this.send(client, {
+        type: 'error',
+        ref,
+        code: 'invalid-request',
+        message: '"id" must be a string',
+      });
+      return;
+    }
     const fail = (err: unknown) => {
       if (err instanceof SessionError) {
         this.send(client, {

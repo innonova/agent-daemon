@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { DAEMON_CONFIG } from '../config/config.js';
 import type { DaemonConfig } from '../config/config.js';
 import { ProfilesService } from '../profiles/profiles.service.js';
-import { LogRecord, SessionLog } from './session-log.js';
+import { LogRecord } from './session-log.js';
 import { Session, SessionError, SessionRecord } from './session.js';
 
 export interface StartRequest {
@@ -99,14 +99,15 @@ export class SessionsService
           fs.readFileSync(metaPath, 'utf8'),
         ) as SessionRecord;
         const session = Session.restore(dir, record);
-        if (record.state === 'running') {
-          // meta.json is not rewritten per record, so take the real
-          // sequence boundary from the log itself.
-          session.markOrphaned(
-            'daemon-restart',
-            Math.max(record.lastSeq, await this.recoverLastSeq(session)),
-          );
+        const wasRunning = record.state === 'running';
+        if (wasRunning) {
+          session.markOrphaned('daemon-restart');
           orphaned++;
+        }
+        // The boundary of an orphaned session, or one whose earlier recovery
+        // failed, comes from the log itself.
+        if (wasRunning || record.lastSeqUnverified) {
+          await session.recoverLastSeq(5);
         }
         this.sessions.set(record.id, session);
       } catch (err) {
@@ -118,27 +119,6 @@ export class SessionsService
     this.logger.log(
       `restored ${this.sessions.size} session(s) from ${this.dir}, ${orphaned} orphaned`,
     );
-  }
-
-  /**
-   * Reads the real sequence boundary from the log, retrying a few times so
-   * a transient open error at boot does not persist a wrong boundary. If it
-   * keeps failing the meta value is used and the problem is logged.
-   */
-  private async recoverLastSeq(session: Session): Promise<number> {
-    let lastErr: unknown;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        return await SessionLog.lastSeq(session.logPath);
-      } catch (err) {
-        lastErr = err;
-        await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
-      }
-    }
-    this.logger.error(
-      `session ${session.record.id}: could not read log tail, keeping recorded lastSeq: ${(lastErr as Error).message}`,
-    );
-    return session.record.lastSeq;
   }
 
   list(): SessionRecord[] {

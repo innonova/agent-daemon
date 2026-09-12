@@ -122,7 +122,8 @@ A session is one child process started from a profile. Its record:
   "exitReason": null,            // "daemon-restart" or "spawn-error: …" when the exit was not the process' own
   "startedAt": 1757653200000,
   "exitedAt": null,
-  "lastSeq": 42
+  "lastSeq": 42,
+  "lastSeqUnverified": true     // only present after a restart whose log read failed; cleared on recovery
 }
 ```
 
@@ -137,6 +138,11 @@ The daemon applies no retention policy; housekeeping is a client concern.
 When the daemon starts, any session recorded as `running` in the state
 directory is marked `exited` with reason `daemon-restart`, and its `lastSeq`
 is recovered from the log itself (meta.json is not rewritten per record).
+If the log cannot be read at that moment the record is flagged
+`lastSeqUnverified`; replay is refused with `replay-failed` until a later
+attach or daemon start manages to read the log, so a stale boundary never
+hides history. Replay also checks that the log can be opened before it
+reports success, even when nothing needs reading.
 Its log stays, so a client can inspect it and start a fresh session with the
 agent's own resume arguments if it wants to continue. A session directory
 whose meta.json is unreadable is ignored but its id stays reserved.

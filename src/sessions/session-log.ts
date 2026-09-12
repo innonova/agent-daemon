@@ -56,7 +56,16 @@ export class SessionLog {
     readonly index: LogIndex = new LogIndex(),
   ) {
     this.fd = fs.openSync(path, 'a');
-    this.size = fs.fstatSync(this.fd).size;
+    try {
+      this.size = fs.fstatSync(this.fd).size;
+    } catch (err) {
+      try {
+        fs.closeSync(this.fd);
+      } catch {
+        /* keep the original error */
+      }
+      throw err;
+    }
   }
 
   append(record: LogRecord): void {
@@ -165,7 +174,19 @@ export class SessionLog {
       let from = Math.max(0, size - 64 * 1024);
       for (;;) {
         const buf = Buffer.alloc(size - from);
-        await fh.read(buf, 0, buf.length, from);
+        // read() may return fewer bytes than asked; fill the range fully.
+        let got = 0;
+        while (got < buf.length) {
+          const { bytesRead } = await fh.read(
+            buf,
+            got,
+            buf.length - got,
+            from + got,
+          );
+          if (bytesRead === 0)
+            throw new Error(`log ${path} shrank while being read`);
+          got += bytesRead;
+        }
         const lines = buf.toString('utf8').split('\n');
         lines.pop(); // whatever follows the last newline is torn or empty
         if (from > 0) lines.shift(); // first line may start mid-record

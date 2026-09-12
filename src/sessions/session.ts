@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { ChildProcess, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { LineSplitter } from './line-splitter.js';
 import { LogIndex, LogRecord, LogStream, SessionLog } from './session-log.js';
@@ -29,6 +30,12 @@ export interface SessionRecord {
   startedAt: number;
   exitedAt: number | null;
   lastSeq: number;
+  /**
+   * Set when the boundary could not be read back from the log after a
+   * daemon restart. Cleared once recovery succeeds; replay is refused
+   * meanwhile so a stale boundary never hides real history.
+   */
+  lastSeqUnverified?: boolean;
 }
 
 export interface SpawnSpec {
@@ -429,14 +436,67 @@ export class Session extends EventEmitter<SessionEvents> {
   }
 
   /** Marks an orphaned session (found running on disk at daemon start) as exited. */
-  markOrphaned(reason: string, lastSeq: number): void {
+  markOrphaned(reason: string): void {
     const r = this.record;
     if (r.state === 'exited') return;
     r.state = 'exited';
     r.exitReason = reason;
     r.exitedAt = Date.now();
-    r.lastSeq = lastSeq;
     this.saveMeta();
+  }
+
+  /**
+   * Reads the real sequence boundary back from the log (meta.json is not
+   * rewritten per record). On success the record is updated and marked
+   * verified; on failure it is marked unverified so nobody trusts it.
+   * Returns whether recovery succeeded.
+   */
+  async recoverLastSeq(attempts = 1): Promise<boolean> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const onDisk = await SessionLog.lastSeq(this.logPath);
+        this.record.lastSeq = Math.max(this.record.lastSeq, onDisk);
+        if (this.record.lastSeqUnverified) {
+          delete this.record.lastSeqUnverified;
+          this.saveMeta();
+        }
+        return true;
+      } catch (err) {
+        lastErr = err;
+        if (attempt + 1 < attempts)
+          await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+      }
+    }
+    Session.logger.error(
+      `session ${this.record.id}: could not read log tail: ${(lastErr as Error).message}`,
+    );
+    if (!this.record.lastSeqUnverified) {
+      this.record.lastSeqUnverified = true;
+      this.saveMeta();
+    }
+    return false;
+  }
+
+  /**
+   * Replay must never run against a boundary that was not read back from
+   * disk, nor against a log that is gone; both would silently hide history.
+   */
+  async ensureReplayable(): Promise<void> {
+    if (this.record.lastSeqUnverified && !(await this.recoverLastSeq())) {
+      throw new SessionError(
+        'replay-failed',
+        'the session log could not be read after a daemon restart',
+      );
+    }
+    try {
+      await (await fsp.open(this.logPath, 'r')).close();
+    } catch (err) {
+      throw new SessionError(
+        'replay-failed',
+        `the session log is not readable: ${(err as Error).message}`,
+      );
+    }
   }
 
   private writeMeta(): void {
