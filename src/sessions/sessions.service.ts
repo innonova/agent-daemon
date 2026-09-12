@@ -1,0 +1,168 @@
+import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { DAEMON_CONFIG } from '../config/config.js';
+import type { DaemonConfig } from '../config/config.js';
+import { ProfilesService } from '../profiles/profiles.service.js';
+import { LogRecord } from './session-log.js';
+import { Session, SessionError, SessionRecord } from './session.js';
+
+export interface StartRequest {
+  profile: string;
+  args?: string[];
+  argsReplace?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  label?: string;
+  id?: string;
+}
+
+interface RegistryEvents {
+  output: [id: string, record: LogRecord];
+  changed: [record: SessionRecord];
+  exit: [record: SessionRecord];
+}
+
+const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * Registry of sessions, running and exited. Owns the on-disk session
+ * directory and re-emits every session's events with its id.
+ */
+@Injectable()
+export class SessionsService
+  extends EventEmitter<RegistryEvents>
+  implements OnModuleInit
+{
+  private readonly logger = new Logger(SessionsService.name);
+  private readonly sessions = new Map<string, Session>();
+
+  constructor(
+    @Inject(DAEMON_CONFIG) private readonly config: DaemonConfig,
+    private readonly profiles: ProfilesService,
+  ) {
+    super();
+  }
+
+  get dir(): string {
+    return path.join(this.config.stateDir, 'sessions');
+  }
+
+  onModuleInit(): void {
+    fs.mkdirSync(this.dir, { recursive: true });
+    this.restoreFromDisk();
+  }
+
+  /** Any session recorded as running belonged to a previous daemon process. */
+  private restoreFromDisk(): void {
+    let entries: string[] = [];
+    try {
+      entries = fs.readdirSync(this.dir);
+    } catch {
+      return;
+    }
+    let orphaned = 0;
+    for (const id of entries) {
+      const dir = path.join(this.dir, id);
+      const metaPath = path.join(dir, 'meta.json');
+      try {
+        const record = JSON.parse(
+          fs.readFileSync(metaPath, 'utf8'),
+        ) as SessionRecord;
+        const session = Session.restore(dir, record);
+        if (record.state === 'running') {
+          session.markOrphaned('daemon-restart');
+          orphaned++;
+        }
+        this.sessions.set(record.id, session);
+      } catch (err) {
+        this.logger.warn(
+          `ignoring session directory ${dir}: ${(err as Error).message}`,
+        );
+      }
+    }
+    this.logger.log(
+      `restored ${this.sessions.size} session(s) from ${this.dir}, ${orphaned} orphaned`,
+    );
+  }
+
+  list(): SessionRecord[] {
+    return [...this.sessions.values()]
+      .map((s) => s.record)
+      .sort((a, b) => a.startedAt - b.startedAt);
+  }
+
+  get(id: string): Session {
+    const s = this.sessions.get(id);
+    if (!s)
+      throw new SessionError('unknown-session', `no session with id ${id}`);
+    return s;
+  }
+
+  start(req: StartRequest): SessionRecord {
+    const profile = this.profiles.get(req.profile);
+    if (!profile)
+      throw new SessionError(
+        'unknown-profile',
+        `no profile named ${req.profile}`,
+      );
+    const id = req.id ?? randomUUID();
+    if (!ID_RE.test(id))
+      throw new SessionError(
+        'invalid-id',
+        'session id must match ' + ID_RE.source,
+      );
+    if (this.sessions.has(id))
+      throw new SessionError('duplicate-id', `session ${id} already exists`);
+
+    const session = Session.start(
+      this.dir,
+      {
+        id,
+        profile: profile.name,
+        label: req.label ?? null,
+        command: profile.command,
+        args: req.argsReplace ?? [...profile.args, ...(req.args ?? [])],
+        cwd: req.cwd ?? profile.cwd ?? process.cwd(),
+        env: { ...profile.env, ...req.env },
+        loginShell: profile.loginShell,
+      },
+      this.config.maxLineBytes,
+    );
+    this.sessions.set(id, session);
+    session.on('output', (record) => this.emit('output', id, record));
+    session.on('exit', (record) => {
+      this.logger.log(
+        `session ${id} exited code=${record.exitCode} signal=${record.signal}`,
+      );
+      this.emit('exit', record);
+      this.emit('changed', record);
+    });
+    this.logger.log(
+      `session ${id} started: ${profile.name} pid=${session.record.pid}`,
+    );
+    this.emit('changed', session.record);
+    return session.record;
+  }
+
+  remove(id: string): void {
+    const session = this.get(id);
+    session.remove();
+    this.sessions.delete(id);
+  }
+
+  /** Sends SIGTERM to every running child; used on shutdown. */
+  terminateAll(): void {
+    for (const s of this.sessions.values()) {
+      if (s.record.state === 'running') {
+        try {
+          s.signal('SIGTERM');
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+  }
+}
