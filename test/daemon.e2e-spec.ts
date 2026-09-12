@@ -28,6 +28,7 @@ async function startFake(c: Client, extra: Record<string, unknown> = {}) {
     ...extra,
   });
   expect(started.type).toBe('session.started');
+  expect(started.attached).toBe(true);
   const id: string = started.session.id;
   const ready = await c.waitForOutput(id, (o) => o?.type === 'ready');
   return { id, ready: JSON.parse(ready.d), session: started.session };
@@ -1103,6 +1104,11 @@ describe('daemon restart', () => {
         JSON.parse(fs.readFileSync(path.join(orphan, 'meta.json'), 'utf8'))
           .exitReason,
       ).toBe('daemon-restart');
+      // the recovered boundary is on disk, so a second restart keeps it
+      expect(
+        JSON.parse(fs.readFileSync(path.join(orphan, 'meta.json'), 'utf8'))
+          .lastSeq,
+      ).toBe(2);
       expect(
         await c.request({ type: 'session.remove', id: 'orphan' }),
       ).toMatchObject({ type: 'ok' });

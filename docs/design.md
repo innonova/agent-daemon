@@ -205,7 +205,7 @@ carries the same `ref`. Events that are not replies have no `ref`.
 | `profiles.list` | | `profiles { profiles[] }` |
 | `profiles.reload` | | `profiles { profiles[] }`, plus `profiles.changed` event to all |
 | `sessions.list` | | `sessions { sessions[] }` |
-| `session.start` | `profile, args?, argsReplace?, cwd?, env?, label?, id?, attach?: bool, replay?` | `session.started { session }` |
+| `session.start` | `profile, args?, argsReplace?, cwd?, env?, label?, id?, attach?: bool, replay?` | `session.started { session, attached?, attachError? }`; the session exists even if the requested attach failed, which `attached: false` and `attachError { code, message }` report |
 | `session.attach` | `id, replay?: false \| true \| { fromSeq }` | replayed `session.output` frames, then `session.attached { session, lastSeq }`; `cancelled` if detached, re-attached or disconnected before replay finished |
 | `session.detach` | `id` | `session.detached { id }` |
 | `session.input` | `id, data` | `ok` once the bytes are in the pipe; `stdin-full` if the process has stopped reading; `stdin-error` if the pipe failed |

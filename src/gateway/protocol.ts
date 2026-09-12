@@ -69,7 +69,14 @@ export type DaemonFrame =
   | { type: 'profiles'; ref?: Ref; profiles: PublicProfile[] }
   | { type: 'sessions'; ref?: Ref; sessions: SessionRecord[] }
   | { type: 'session'; ref?: Ref; session: SessionRecord }
-  | { type: 'session.started'; ref?: Ref; session: SessionRecord }
+  | {
+      type: 'session.started';
+      ref?: Ref;
+      session: SessionRecord;
+      /** Present when `attach` was requested. */
+      attached?: boolean;
+      attachError?: { code: string; message: string };
+    }
   | {
       type: 'session.attached';
       ref?: Ref;

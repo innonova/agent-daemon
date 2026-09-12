@@ -88,6 +88,7 @@ export class Session extends EventEmitter<SessionEvents> {
   private childExited = false;
   private closePipes: (() => void) | null = null;
   private metaRetry: NodeJS.Timeout | null = null;
+  private removed = false;
   private writes: Promise<void> = Promise.resolve();
 
   constructor(
@@ -456,11 +457,12 @@ export class Session extends EventEmitter<SessionEvents> {
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const onDisk = await SessionLog.lastSeq(this.logPath);
+        const changed =
+          onDisk > this.record.lastSeq || this.record.lastSeqUnverified;
         this.record.lastSeq = Math.max(this.record.lastSeq, onDisk);
-        if (this.record.lastSeqUnverified) {
-          delete this.record.lastSeqUnverified;
-          this.saveMeta();
-        }
+        delete this.record.lastSeqUnverified;
+        // Persist, or the next restart would start from the stale value.
+        if (changed) this.saveMeta();
         return true;
       } catch (err) {
         lastErr = err;
@@ -516,6 +518,7 @@ export class Session extends EventEmitter<SessionEvents> {
       clearTimeout(this.metaRetry);
       this.metaRetry = null;
     }
+    if (this.removed) return; // nothing on disk to keep in step any more
     try {
       this.writeMeta();
     } catch (err) {
@@ -533,6 +536,7 @@ export class Session extends EventEmitter<SessionEvents> {
       throw new SessionError('session-running', 'session is still running');
     }
     fs.rmSync(this.dir, { recursive: true, force: true });
+    this.removed = true;
     if (this.metaRetry) clearTimeout(this.metaRetry);
     this.metaRetry = null;
   }

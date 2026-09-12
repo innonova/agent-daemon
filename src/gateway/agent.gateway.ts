@@ -198,15 +198,30 @@ export class AgentGateway
         throw new SessionError('invalid-request', '"attach" must be a boolean');
       }
       const session = this.sessions.start(f);
-      if (f.attach) {
+      if (!f.attach) return { type: 'session.started', session };
+      // The session exists whatever happens to the attachment, so the reply
+      // is always session.started; the attach outcome rides along.
+      try {
         const result = await this.attach(client, session.id, replay);
         if (result === null)
           throw new SessionError(
             'cancelled',
             'attachment was cancelled before it completed',
           );
+        return {
+          type: 'session.started',
+          session: this.sessions.get(session.id).record,
+          attached: true,
+        };
+      } catch (err) {
+        const code = err instanceof SessionError ? err.code : 'internal';
+        return {
+          type: 'session.started',
+          session,
+          attached: false,
+          attachError: { code, message: (err as Error).message },
+        };
       }
-      return { type: 'session.started', session };
     });
   }
 
