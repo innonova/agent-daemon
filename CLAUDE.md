@@ -26,17 +26,39 @@ NestJS 12 on Node 24, ESM (`"type": "module"`, imports use `.js` suffix),
 vitest for tests, oxlint + prettier.
 
 ```
-npm run start:dev   # watch mode
-npm run build       # nest build -> dist/
-npm test            # vitest unit tests (src/**/*.spec.ts)
-npm run test:e2e    # vitest, test/**
-npm run lint
-npm run format
+npm run start:dev       # watch mode
+npm run build           # nest build -> dist/
+npm test                # unit tests (src/**/*.spec.ts)
+npm run test:e2e        # builds first; drives the protocol against a fake agent and runs dist/main.js as a real process
+npm run smoke:agents    # opt-in, COSTS TOKENS on three vendors; one real turn per agent CLI
+npm run install:service # RESTARTS the installed daemon and ENDS EVERY RUNNING SESSION on this box
+npm run lint && npm run format
 ```
+
+The tests spawn real child processes and open real sockets; they will not
+run in a sandbox that forbids that.
+
+## Working here
+
+- **Do not restart the installed service casually.** It is the thing the
+  whole project exists to keep alive. `install:service`, `systemctl --user
+  restart agent-daemon` and a reboot all end every session. Check
+  `sessions.list` (or `journalctl --user -u agent-daemon`) for running
+  sessions before doing any of them, and say so when you do.
+- **Review loop**: Codex deep review with the custom prompt for substantive
+  passes, `claude -p` for cheap second opinions, reviewers report and this
+  side fixes. Prompts and the how-to are in `docs/reviewing.md`.
+- **Docs have audiences**: `docs/design.md` for people changing the daemon,
+  `docs/client-guide.md` for people building on it, `README.md` for
+  operators. A behaviour change usually touches design.md; a protocol
+  change touches the client guide too.
+- Prettier reformats aggressively; do not rely on exact-text matches of
+  source you have not just read.
 
 ## Local environment
 
 Claude Code, Codex and Copilot CLI are installed and logged in on this box,
-so real end-to-end runs are possible. `ELECTRON_RUN_AS_NODE` may leak from
-IDE shells; unset it before launching anything Electron-based, though this
-project itself is plain Node.
+so real end-to-end runs are possible, and the daemon itself runs as the
+`agent-daemon` user service on `127.0.0.1:4267`. `ELECTRON_RUN_AS_NODE`
+leaks from IDE shells; the smoke script and the unit file already unset it,
+but unset it yourself before launching the agent CLIs by hand.
