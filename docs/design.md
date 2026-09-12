@@ -1,6 +1,6 @@
 # agent-daemon design
 
-Status: draft, 2026-09-12. Nothing here is implemented yet.
+Status: implemented 2026-09-12; this document is kept in step with the code.
 
 ## Purpose
 
@@ -103,13 +103,33 @@ keep the command line they were started with.
 
 ## Sessions
 
-A session is one child process started from a profile. It has:
+A session is one child process started from a profile. Its record:
 
-- `id`: uuid assigned by the daemon (a client may supply its own at start).
-- `profile`, `label`, resolved `command`, `args`, `cwd`, `env` (as started).
-- `state`: `running` or `exited`, plus `exitCode` / `signal` when exited.
-- `startedAt`, `exitedAt`.
-- A log on disk (below).
+```json
+{
+  "id": "1413ac7e-…",            // uuid, or the client-supplied id (^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$)
+  "profile": "claude",
+  "label": null,
+  "command": "claude",
+  "args": ["-p", "…"],           // as resolved at start
+  "cwd": "/home/me/project",
+  "env": {},                     // the overlay only, not the inherited environment
+  "loginShell": false,
+  "pid": 12345,                  // null once exited or when never spawned
+  "state": "running",            // or "exited"
+  "exitCode": null,
+  "signal": null,
+  "exitReason": null,            // "daemon-restart" or "spawn-error: …" when the exit was not the process' own
+  "startedAt": 1757653200000,
+  "exitedAt": null,
+  "lastSeq": 42
+}
+```
+
+A spawn failure (command not found, cwd missing) is not a request error:
+the session is created, a stderr-style log record with the OS error is
+written, and the session exits with `exitReason` `spawn-error: …`. The
+client sees the same frames it would for any short-lived process.
 
 Exited sessions are retained, with their logs, until a client removes them.
 The daemon applies no retention policy; housekeeping is a client concern.
@@ -148,7 +168,10 @@ alone. The daemon keeps no line history in memory; replay reads the file.
 
 Endpoint: `ws://127.0.0.1:4267/`. TCP only, no unix socket, to keep client
 configuration uniform. Host and port come from `AGENT_DAEMON_LISTEN`
-(default `127.0.0.1:4267`). `GET /health` over HTTP returns 200.
+(default `127.0.0.1:4267`). `GET /health` over HTTP returns 200 with
+`{"status":"ok"}`.
+
+The TypeScript types for every frame live in `src/gateway/protocol.ts`.
 
 Every frame is a JSON object with a `type`. Client requests carry a `ref`
 (any string the client chooses); the daemon's direct reply to a request
@@ -158,7 +181,7 @@ carries the same `ref`. Events that are not replies have no `ref`.
 
 | type | fields | reply |
 |---|---|---|
-| `hello` | `protocol: 1` | `welcome { protocol, version, profiles[], sessions[] }` |
+| `hello` | `protocol: 1` | `welcome { protocol, version, profiles[], sessions[] }`, or `error` `unsupported-protocol` |
 | `profiles.list` | | `profiles { profiles[] }` |
 | `profiles.reload` | | `profiles { profiles[] }`, plus `profiles.changed` event to all |
 | `sessions.list` | | `sessions { sessions[] }` |
@@ -185,7 +208,15 @@ Attachment is per connection. A connection may be attached to any number of
 sessions, and a session may have any number of attached connections, all of
 which receive its output. Input is accepted from any connection, attached or
 not. Closing the connection detaches it from everything; it never affects the
-sessions.
+sessions. Attaching to a session the connection is already attached to is a
+no-op unless replay is requested, in which case the attachment is redone
+with replay.
+
+`hello` is optional; the daemon answers any request on a fresh connection.
+
+Frames that are not valid JSON, or have no string `type`, get an `error`
+with code `malformed` (carrying the `ref` if one could be read). A `type`
+the daemon does not know gets `error` `unknown-type`.
 
 ### Daemon → client
 
@@ -198,17 +229,29 @@ sessions.
 | `error` | `ref?, id?, code, message` |
 | `ok` | `ref` |
 
+`session.changed`, `session.exit` and `profiles.changed` go to every
+connection, attached or not, so a client can keep a session list current
+without attaching to everything. `session.output` goes only to attached
+connections.
+
+Error codes: `malformed`, `unknown-type`, `unsupported-protocol`,
+`unknown-profile`, `unknown-session`, `invalid-id`, `duplicate-id`,
+`invalid-input`, `invalid-signal`, `session-not-running`, `session-running`,
+`stdin-closed`, `slow-consumer`, `internal`.
+
 Replay: on attach with replay, the daemon streams the log file from the
 requested `seq` as `session.output` frames, buffering live output produced
 meanwhile, then flushes the buffer and sends `session.attached`. From that
 point the client receives live frames. `seq` is contiguous, so a client that
 reconnects asks for `{ fromSeq: lastSeen + 1 }` and misses nothing.
 
-Backpressure: if a client's socket buffer grows beyond a threshold the
-daemon drops that client's attachments and sends an `error` with code
-`slow-consumer`; it never blocks or buffers unboundedly on behalf of a
-client. The log on disk remains authoritative and the client may reattach
-with replay.
+Backpressure: if a client's socket buffer grows beyond a threshold
+(`AGENT_DAEMON_SLOW_CONSUMER_BYTES`, default 64 MB) while receiving live
+output, the daemon drops that client's attachments and sends an `error`
+with code `slow-consumer`; it never blocks or buffers unboundedly on behalf
+of a client. During replay, which is pull-based, the daemon instead pauses
+reading the log until the socket drains. The log on disk remains
+authoritative and the client may reattach with replay.
 
 ## Process management
 
@@ -225,6 +268,32 @@ with replay.
   reading continues from the next newline.
 - No automatic restart of exited children. Resume is an agent feature the
   client drives through arguments.
+- On `SIGTERM`/`SIGINT` the daemon sends `SIGTERM` to every running child
+  and exits. Their records are rewritten as exited by the next daemon
+  start (`daemon-restart`), since the exit itself is not observed.
+
+## Configuration
+
+All configuration is by environment variable; there is no config file.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AGENT_DAEMON_LISTEN` | `127.0.0.1:4267` | `host:port` to bind |
+| `AGENT_DAEMON_CONFIG_DIR` | `$XDG_CONFIG_HOME/agent-daemon` (`~/.config/agent-daemon`) | holds `profiles/` |
+| `AGENT_DAEMON_STATE_DIR` | `$XDG_STATE_HOME/agent-daemon` (`~/.local/state/agent-daemon`) | holds `sessions/` |
+| `AGENT_DAEMON_MAX_LINE` | `10485760` | per-line byte limit |
+| `AGENT_DAEMON_SLOW_CONSUMER_BYTES` | `67108864` | unsent bytes before a client is detached |
+
+## Testing
+
+- `npm test`: unit tests for the line splitter, log, profile parsing and
+  config.
+- `npm run test:e2e`: boots the daemon on an ephemeral port with temporary
+  directories and drives every protocol frame against a fake agent
+  (`test/fixtures/fake-agent.mjs`) that can echo, write stderr, emit
+  oversized and partial lines, trap signals and exit on command.
+- `npm run smoke:agents [claude|codex|copilot]`: opt-in, costs tokens, runs
+  one real turn through each installed agent CLI and checks the answer.
 
 ## Running it
 
