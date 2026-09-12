@@ -112,7 +112,11 @@ with caveats. When asked:
   if you cannot or should not continue, say why in the report and set
   `status: blocked`;
 - commit the file with the work; never edit the other frontmatter
-  fields, and do not create or edit feature files otherwise unless asked.
+  fields, and do not create or edit feature files otherwise unless asked;
+- when asked to work through several or all planned features, re-read
+  `features/` before finishing and take up anything planned that appeared
+  meanwhile, so the batch drains rather than stops at the list you
+  started with.
 
 The human reads the report in the manager, answers under `## Response`
 and sets the status back to `planned`, or marks it `done`. The
