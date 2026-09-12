@@ -74,6 +74,8 @@ export class Session extends EventEmitter<SessionEvents> {
   private stdinOpen = false;
   private stdinLimit = Infinity;
   private pipeGrace: NodeJS.Timeout | null = null;
+  private closePipesOnExit = false;
+  private metaRetry: NodeJS.Timeout | null = null;
   private writes: Promise<void> = Promise.resolve();
 
   constructor(
@@ -199,6 +201,11 @@ export class Session extends EventEmitter<SessionEvents> {
     // ended. A descendant that inherited the pipes can hold them open, so
     // after a grace period we destroy the streams ourselves.
     child.on('exit', () => {
+      if (this.closePipesOnExit) {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        return;
+      }
       this.pipeGrace = setTimeout(() => {
         this.pipeGrace = null;
         Session.logger.warn(
@@ -245,8 +252,11 @@ export class Session extends EventEmitter<SessionEvents> {
       s,
       d,
     };
-    this.persist(record);
+    const notice = this.persist(record);
     this.emit('output', record);
+    // Any logging notice follows the record it concerns, so seq order on the
+    // wire matches the order of sequence numbers.
+    if (notice) this.emitRecord('err', notice);
   }
 
   /**
@@ -255,17 +265,14 @@ export class Session extends EventEmitter<SessionEvents> {
    * told when logging fails and when it recovers, so they know replay has a
    * hole.
    */
-  private persist(record: LogRecord): void {
-    if (!this.log) return;
+  private persist(record: LogRecord): string | null {
+    if (!this.log) return null;
     try {
       this.log.append(record);
       if (this.logFailing) {
         this.logFailing = false;
         Session.logger.log(`session ${this.record.id}: log writes recovered`);
-        this.emitRecord(
-          'err',
-          `agent-daemon: log writes recovered; records before seq ${record.seq} may be missing from replay`,
-        );
+        return `agent-daemon: log writes recovered; records up to seq ${record.seq - 1} may be missing from replay`;
       }
     } catch (err) {
       if (!this.logFailing) {
@@ -273,12 +280,10 @@ export class Session extends EventEmitter<SessionEvents> {
         Session.logger.error(
           `session ${this.record.id}: log write failed: ${(err as Error).message}`,
         );
-        this.emitRecord(
-          'err',
-          `agent-daemon: log write failed (${(err as Error).message}); replay will be incomplete`,
-        );
+        return `agent-daemon: log write failed (${(err as Error).message}); replay will be incomplete from seq ${record.seq}`;
       }
     }
+    return null;
   }
 
   private finish(
@@ -322,10 +327,12 @@ export class Session extends EventEmitter<SessionEvents> {
     const write = new Promise<void>((resolve, reject) => {
       stdin.write(line + '\n', (err) => {
         if (!err) return resolve();
-        this.emitRecord(
-          'err',
-          `agent-daemon: stdin write failed: ${err.message}`,
-        );
+        // After exit the log is closed and the record final; only report.
+        if (this.record.state === 'running')
+          this.emitRecord(
+            'err',
+            `agent-daemon: stdin write failed: ${err.message}`,
+          );
         reject(
           new SessionError('stdin-error', `stdin write failed: ${err.message}`),
         );
@@ -350,6 +357,16 @@ export class Session extends EventEmitter<SessionEvents> {
     if (this.record.state !== 'running' || !this.child)
       throw new SessionError('session-not-running', 'session is not running');
     this.child.kill(sig);
+  }
+
+  /**
+   * Shutdown variant of `signal`: once the child exits its pipes are closed
+   * at once rather than after the grace period, so the exit is recorded
+   * before the daemon goes away even if a descendant holds the pipes.
+   */
+  terminate(sig: NodeJS.Signals): void {
+    this.closePipesOnExit = true;
+    this.signal(sig);
   }
 
   /** Waits for the session to exit, at most `ms`. Resolves true if it did. */
@@ -385,20 +402,35 @@ export class Session extends EventEmitter<SessionEvents> {
     fs.renameSync(tmp, this.metaPath);
   }
 
+  /**
+   * Persists the record. A failure is logged and retried every 10 s until
+   * it succeeds: there may be no later state change to piggyback on (the
+   * exit is the last one), and a lost exit would be reported as
+   * `daemon-restart` after the next start.
+   */
   saveMeta(): void {
+    if (this.metaRetry) {
+      clearTimeout(this.metaRetry);
+      this.metaRetry = null;
+    }
     try {
       this.writeMeta();
     } catch (err) {
       Session.logger.error(
-        `session ${this.record.id}: could not write meta.json: ${(err as Error).message}`,
+        `session ${this.record.id}: could not write meta.json, retrying: ${(err as Error).message}`,
       );
+      this.metaRetry = setTimeout(() => this.saveMeta(), 10_000);
+      this.metaRetry.unref();
     }
   }
 
   /** Deletes everything on disk. Only valid once exited. */
   remove(): void {
-    if (this.record.state !== 'exited')
+    if (this.record.state !== 'exited') {
       throw new SessionError('session-running', 'session is still running');
+    }
+    if (this.metaRetry) clearTimeout(this.metaRetry);
+    this.metaRetry = null;
     fs.rmSync(this.dir, { recursive: true, force: true });
   }
 

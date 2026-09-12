@@ -38,6 +38,7 @@ export function makeDirs(prefix = 'agent-daemon-test-'): {
 export async function startDaemon(
   opts: {
     maxLineBytes?: number;
+    pipeGraceMs?: number;
     dirs?: { configDir: string; stateDir: string };
     profiles?: boolean;
   } = {},
@@ -65,7 +66,7 @@ export async function startDaemon(
       stateDir: dirs.stateDir,
       maxLineBytes: opts.maxLineBytes ?? 4096,
       slowConsumerBytes: 1024 * 1024,
-      pipeGraceMs: 300,
+      pipeGraceMs: opts.pipeGraceMs ?? 300,
     },
     { quiet: !process.env.TEST_VERBOSE },
   );

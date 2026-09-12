@@ -237,7 +237,7 @@ the daemon does not know gets `error` `unknown-type`.
 | type | fields |
 |---|---|
 | `session.output` | `id, seq, t, s, d` (same shape as the log record) |
-| `session.exit` | `id, exitCode, signal, exitedAt` |
+| `session.exit` | `id, exitCode, signal, exitReason, exitedAt` |
 | `session.changed` | `session` (state or metadata change) |
 | `profiles.changed` | `profiles[]` |
 | `error` | `ref?, id?, code, message` |

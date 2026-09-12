@@ -54,6 +54,20 @@ rl.on('line', (line) => {
       setInterval(() => {}, 1000); // a paused stdin no longer keeps the loop alive
       out({ type: 'paused' });
       break;
+    case 'orphan-hold': {
+      // keep running while a grandchild also holds our stdout
+      const kid = spawn(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        {
+          stdio: ['ignore', 'inherit', 'inherit'],
+          detached: true,
+        },
+      );
+      kid.unref();
+      out({ type: 'orphaned', pid: kid.pid });
+      break;
+    }
     case 'orphan': {
       // leave a grandchild holding our stdout open, then exit
       const kid = spawn(

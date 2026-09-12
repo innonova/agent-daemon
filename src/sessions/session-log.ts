@@ -48,6 +48,8 @@ export class LogIndex {
 export class SessionLog {
   private fd: number | null;
   private size: number;
+  /** A previous append stopped mid-record; the next one must start a new line. */
+  private torn = false;
 
   constructor(
     readonly path: string,
@@ -59,15 +61,25 @@ export class SessionLog {
 
   append(record: LogRecord): void {
     if (this.fd === null) throw new Error('log is closed');
-    const buf = Buffer.from(JSON.stringify(record) + '\n');
-    const offset = this.size;
+    const buf = Buffer.from(
+      (this.torn ? '\n' : '') + JSON.stringify(record) + '\n',
+    );
+    const offset = this.size + (this.torn ? 1 : 0);
     let written = 0;
-    while (written < buf.length) {
-      const n = fs.writeSync(this.fd, buf, written, buf.length - written);
-      if (n <= 0) throw new Error('short write');
-      written += n;
-      this.size += n;
+    try {
+      while (written < buf.length) {
+        const n = fs.writeSync(this.fd, buf, written, buf.length - written);
+        if (n <= 0) throw new Error('short write');
+        written += n;
+        this.size += n;
+      }
+    } catch (err) {
+      // Whatever may have landed is a torn fragment; make sure the next
+      // record does not get glued onto it. An extra empty line is harmless.
+      this.torn = true;
+      throw err;
     }
+    this.torn = false;
     this.index.note(record.seq, offset);
   }
 

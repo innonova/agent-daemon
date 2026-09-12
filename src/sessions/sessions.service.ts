@@ -133,13 +133,13 @@ export class SessionsService
   }
 
   start(req: StartRequest): SessionRecord {
+    validateStartRequest(req);
     const profile = this.profiles.get(req.profile);
     if (!profile)
       throw new SessionError(
         'unknown-profile',
         `no profile named ${req.profile}`,
       );
-    validateStartRequest(req);
     const id = req.id ?? randomUUID();
     if (!ID_RE.test(id))
       throw new SessionError(
@@ -199,7 +199,7 @@ export class SessionsService
       [...this.sessions.values()].filter((s) => s.record.state === 'running');
     for (const s of running()) {
       try {
-        s.signal('SIGTERM');
+        s.terminate('SIGTERM');
       } catch {
         /* already gone */
       }
@@ -211,7 +211,7 @@ export class SessionsService
         `session ${s.record.id} ignored SIGTERM; sending SIGKILL`,
       );
       try {
-        s.signal('SIGKILL');
+        s.terminate('SIGKILL');
       } catch {
         /* already gone */
       }

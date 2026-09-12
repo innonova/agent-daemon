@@ -89,6 +89,34 @@ describe('SessionLog', () => {
     expect(await SessionLog.lastSeq(file)).toBe(5000);
   });
 
+  it('starts a new line after a partial write so the next record stays readable', async () => {
+    const log = new SessionLog(file);
+    log.append({ seq: 1, t: 1, s: 'out', d: 'a' });
+    const real = fs.writeSync;
+    let calls = 0;
+    const spy = vi
+      .spyOn(fs, 'writeSync')
+      .mockImplementation((fd: number, buf: any, off?: any, len?: any) => {
+        calls++;
+        if (calls === 1) {
+          real(fd, buf, 0, 5); // five bytes land, then the disk fails
+          throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+        }
+        return real(fd, buf, off, len);
+      });
+    try {
+      expect(() => log.append({ seq: 2, t: 2, s: 'out', d: 'b' })).toThrow(
+        'ENOSPC',
+      );
+      log.append({ seq: 3, t: 3, s: 'out', d: 'c' });
+    } finally {
+      spy.mockRestore();
+    }
+    log.close();
+    expect((await collect(file)).map((r) => r.seq)).toEqual([1, 3]);
+    expect(await SessionLog.lastSeq(file)).toBe(3);
+  });
+
   it('refuses to append after close', () => {
     const log = new SessionLog(file);
     log.close();

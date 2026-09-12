@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { SessionsService } from '../src/sessions/sessions.service.js';
 import {
   Client,
   Daemon,
@@ -152,6 +153,7 @@ describe('starting sessions', () => {
     const c = await connect();
     const before = fs.readdirSync(path.join(d.stateDir, 'sessions')).length;
     for (const bad of [
+      { profile: 5 },
       { args: 'no' },
       { args: [1] },
       { argsReplace: 'no' },
@@ -1004,6 +1006,48 @@ describe('daemon restart', () => {
       ).toMatchObject({ type: 'ok' });
       await c.close();
     } finally {
+      await d2.stop();
+    }
+  });
+
+  it('records exits on shutdown even when a descendant holds the pipes', async () => {
+    const d2 = await startDaemon({ dirs: makeDirs(), pipeGraceMs: 20000 });
+    let orphanPid = 0;
+    try {
+      const c = await Client.connect(d2.url);
+      const started = await c.request<any>({
+        type: 'session.start',
+        profile: 'fake',
+        attach: true,
+      });
+      const id: string = started.session.id;
+      await c.request({
+        type: 'session.input',
+        id,
+        data: { cmd: 'orphan-hold' },
+      });
+      orphanPid = JSON.parse(
+        (await c.waitForOutput(id, (o) => o?.type === 'orphaned')).d,
+      ).pid;
+      const t0 = Date.now();
+      await d2.app.get(SessionsService).terminateAll();
+      expect(Date.now() - t0).toBeLessThan(5000);
+      const meta = JSON.parse(
+        fs.readFileSync(
+          path.join(d2.stateDir, 'sessions', id, 'meta.json'),
+          'utf8',
+        ),
+      );
+      expect(meta).toMatchObject({ state: 'exited', signal: 'SIGTERM' });
+      await c.close();
+    } finally {
+      if (orphanPid) {
+        try {
+          process.kill(orphanPid, 'SIGKILL');
+        } catch {
+          /* gone */
+        }
+      }
       await d2.stop();
     }
   });
