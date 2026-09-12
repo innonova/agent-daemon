@@ -291,6 +291,15 @@ export class AgentGateway
       if (!replay) return session.record.lastSeq;
       this.detach(client, id);
     }
+    if (
+      typeof replay === 'object' &&
+      (replay === null || !Number.isInteger(replay.fromSeq))
+    ) {
+      throw new SessionError(
+        'invalid-request',
+        '"replay" must be a boolean or { fromSeq: integer }',
+      );
+    }
     const fromSeq =
       replay === true
         ? 1

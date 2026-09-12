@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ChildProcess, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -54,6 +55,7 @@ function shellQuote(s: string): string {
  * them; attaches no meaning to their content.
  */
 export class Session extends EventEmitter<SessionEvents> {
+  private static readonly logger = new Logger(Session.name);
   readonly record: SessionRecord;
   private child: ChildProcess | null = null;
   private log: SessionLog | null = null;
@@ -96,7 +98,15 @@ export class Session extends EventEmitter<SessionEvents> {
     };
     const session = new Session(dir, record);
     session.log = new SessionLog(session.logPath);
-    session.spawn(maxLineBytes);
+    try {
+      session.spawn(maxLineBytes);
+    } catch (err) {
+      // spawn() only throws for bad argument types; async failures such as
+      // ENOENT surface as an 'error' event and are recorded as an exit.
+      session.log.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+      throw new SessionError('invalid-request', (err as Error).message);
+    }
     session.saveMeta();
     return session;
   }
@@ -174,7 +184,19 @@ export class Session extends EventEmitter<SessionEvents> {
       s,
       d,
     };
-    this.log?.append(record);
+    if (this.log) {
+      try {
+        this.log.append(record);
+      } catch (err) {
+        // Disk trouble must not take the daemon or the session down. Live
+        // delivery continues; replay will be missing records from here on.
+        Session.logger.error(
+          `session ${this.record.id}: log write failed, disabling log: ${(err as Error).message}`,
+        );
+        this.log.close();
+        this.log = null;
+      }
+    }
     this.emit('output', record);
   }
 
@@ -235,9 +257,15 @@ export class Session extends EventEmitter<SessionEvents> {
   }
 
   saveMeta(): void {
-    const tmp = this.metaPath + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(this.record, null, 2));
-    fs.renameSync(tmp, this.metaPath);
+    try {
+      const tmp = this.metaPath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(this.record, null, 2));
+      fs.renameSync(tmp, this.metaPath);
+    } catch (err) {
+      Session.logger.error(
+        `session ${this.record.id}: could not write meta.json: ${(err as Error).message}`,
+      );
+    }
   }
 
   /** Deletes everything on disk. Only valid once exited. */

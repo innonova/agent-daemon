@@ -25,6 +25,15 @@ async function bootstrap(): Promise<void> {
   const config = app.get<DaemonConfig>(DAEMON_CONFIG);
   const logger = new Logger('main');
 
+  // Staying up matters more than a clean stack: a bug in one request must
+  // not end every session on the machine.
+  process.on('uncaughtException', (err) =>
+    logger.error(`uncaught exception: ${err.stack ?? err}`),
+  );
+  process.on('unhandledRejection', (err) =>
+    logger.error(`unhandled rejection: ${(err as Error)?.stack ?? err}`),
+  );
+
   process.on('SIGHUP', () => {
     logger.log('SIGHUP received, reloading profiles');
     app
@@ -43,8 +52,13 @@ async function bootstrap(): Promise<void> {
   }
 
   await app.listen(config.port, config.host);
-  const address = app.getHttpServer().address() as { address: string; port: number };
-  logger.log(`agent-daemon listening on ws://${address.address}:${address.port}/`);
+  const address = app.getHttpServer().address() as {
+    address: string;
+    port: number;
+  };
+  logger.log(
+    `agent-daemon listening on ws://${address.address}:${address.port}/`,
+  );
 }
 
 if (

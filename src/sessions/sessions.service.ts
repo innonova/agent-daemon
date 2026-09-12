@@ -27,6 +27,32 @@ interface RegistryEvents {
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
+const isStringArray = (v: unknown): v is string[] =>
+  Array.isArray(v) && v.every((x) => typeof x === 'string');
+
+/** Shape checks only; the daemon never judges the content of a request. */
+function validateStartRequest(req: StartRequest): void {
+  const bad = (what: string) =>
+    new SessionError('invalid-request', `${what} has the wrong type`);
+  if (typeof req.profile !== 'string') throw bad('"profile"');
+  if (req.args !== undefined && !isStringArray(req.args)) throw bad('"args"');
+  if (req.argsReplace !== undefined && !isStringArray(req.argsReplace))
+    throw bad('"argsReplace"');
+  if (req.cwd !== undefined && typeof req.cwd !== 'string') throw bad('"cwd"');
+  if (req.label !== undefined && typeof req.label !== 'string')
+    throw bad('"label"');
+  if (req.id !== undefined && typeof req.id !== 'string') throw bad('"id"');
+  if (
+    req.env !== undefined &&
+    (typeof req.env !== 'object' ||
+      req.env === null ||
+      Array.isArray(req.env) ||
+      !Object.values(req.env).every((v) => typeof v === 'string'))
+  ) {
+    throw bad('"env"');
+  }
+}
+
 /**
  * Registry of sessions, running and exited. Owns the on-disk session
  * directory and re-emits every session's events with its id.
@@ -108,6 +134,7 @@ export class SessionsService
         'unknown-profile',
         `no profile named ${req.profile}`,
       );
+    validateStartRequest(req);
     const id = req.id ?? randomUUID();
     if (!ID_RE.test(id))
       throw new SessionError(

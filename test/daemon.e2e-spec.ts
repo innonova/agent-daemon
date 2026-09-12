@@ -148,6 +148,35 @@ describe('starting sessions', () => {
     expect(bad).toMatchObject({ type: 'error', code: 'invalid-id' });
   });
 
+  it('rejects wrongly typed request fields without creating anything', async () => {
+    const c = await connect();
+    const before = fs.readdirSync(path.join(d.stateDir, 'sessions')).length;
+    for (const bad of [
+      { args: 'no' },
+      { args: [1] },
+      { argsReplace: 'no' },
+      { env: ['x'] },
+      { env: { A: 1 } },
+      { cwd: 5 },
+      { label: {} },
+      { id: 7 },
+    ]) {
+      const e = await c.request<any>({
+        type: 'session.start',
+        profile: 'fake',
+        ...bad,
+      });
+      expect(e).toMatchObject({ type: 'error', code: 'invalid-request' });
+    }
+    expect(fs.readdirSync(path.join(d.stateDir, 'sessions')).length).toBe(
+      before,
+    );
+    const { id } = await startFake(c);
+    expect(
+      await c.request({ type: 'session.attach', id, replay: { fromSeq: 'x' } }),
+    ).toMatchObject({ type: 'error', code: 'invalid-request' });
+  });
+
   it('rejects an unknown profile', async () => {
     const c = await connect();
     const e = await c.request<any>({ type: 'session.start', profile: 'nope' });
