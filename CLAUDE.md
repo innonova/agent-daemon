@@ -55,6 +55,28 @@ run in a sandbox that forbids that.
 - Prettier reformats aggressively; do not rely on exact-text matches of
   source you have not just read.
 
+## Finishing work
+
+Completed work is committed, pushed and deployed without asking first.
+None of those needs approval; they need judgement. A change is complete
+when it does what was asked, tests and lint pass, and the docs that
+describe the behaviour are updated (`docs/design.md` for a behaviour
+change, `README.md` for an operator-facing one). Then:
+
+- commit on the branch you are on (these repositories work on `main`)
+  with a message that says what changed and why;
+- push;
+- deploy: **not the daemon.** `npm run install:service` here ends every
+  session, including yours. Commit and push, say in the summary that the
+  install is pending, and leave it to a human.
+- say in the summary what was committed, pushed and deployed.
+
+Still ask first for force-pushes, history rewrites, deleting branches,
+anything that ends daemon sessions, and work beyond what was asked. When
+the work is a feature from `features/`, the manager moves its status when
+your turn ends; commit and push before the turn ends, never edit the
+status yourself.
+
 ## You may be running inside this system
 
 These three repositories are registered as one project in the installed
