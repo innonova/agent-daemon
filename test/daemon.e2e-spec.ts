@@ -1104,6 +1104,11 @@ describe('daemon restart', () => {
         JSON.parse(fs.readFileSync(path.join(orphan, 'meta.json'), 'utf8'))
           .exitReason,
       ).toBe('daemon-restart');
+      // and an interruption before recovery would have left the flag on disk
+      expect(
+        JSON.parse(fs.readFileSync(path.join(orphan, 'meta.json'), 'utf8'))
+          .lastSeqUnverified,
+      ).toBeUndefined();
       // the recovered boundary is on disk, so a second restart keeps it
       expect(
         JSON.parse(fs.readFileSync(path.join(orphan, 'meta.json'), 'utf8'))

@@ -15,6 +15,7 @@ export class ProfilesService implements OnModuleInit {
   private readonly logger = new Logger(ProfilesService.name);
   private readonly emitter = new EventEmitter();
   private profiles = new Map<string, Profile>();
+  private reloading: Promise<Profile[]> = Promise.resolve([]);
 
   constructor(@Inject(DAEMON_CONFIG) private readonly config: DaemonConfig) {}
 
@@ -47,7 +48,18 @@ export class ProfilesService implements OnModuleInit {
    * that fail to parse are logged and skipped so one bad file cannot take
    * the others down. A missing directory yields an empty set.
    */
-  async reload(): Promise<Profile[]> {
+  reload(): Promise<Profile[]> {
+    // Reloads are serialised so an older read can never overwrite a newer
+    // set: each one starts after the previous has committed.
+    const run = this.reloading.then(
+      () => this.doReload(),
+      () => this.doReload(),
+    );
+    this.reloading = run;
+    return run;
+  }
+
+  private async doReload(): Promise<Profile[]> {
     const next = new Map<string, Profile>();
     let entries: string[] = [];
     try {

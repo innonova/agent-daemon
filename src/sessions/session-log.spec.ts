@@ -159,6 +159,20 @@ describe('SessionLog', () => {
     }
   });
 
+  it('closes its descriptor if construction fails after open', () => {
+    const spy = vi.spyOn(fs, 'fstatSync').mockImplementation(() => {
+      throw Object.assign(new Error('EIO'), { code: 'EIO' });
+    });
+    const closeSpy = vi.spyOn(fs, 'closeSync');
+    try {
+      expect(() => new SessionLog(file)).toThrow('EIO');
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+      closeSpy.mockRestore();
+    }
+  });
+
   it('refuses to append after close', () => {
     const log = new SessionLog(file);
     log.close();

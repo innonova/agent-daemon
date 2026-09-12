@@ -443,6 +443,10 @@ export class Session extends EventEmitter<SessionEvents> {
     r.state = 'exited';
     r.exitReason = reason;
     r.exitedAt = Date.now();
+    // The recorded boundary is stale until recoverLastSeq() has read the
+    // log; say so on disk first, so an interruption before recovery cannot
+    // leave an exited record that looks trustworthy.
+    r.lastSeqUnverified = true;
     this.saveMeta();
   }
 
