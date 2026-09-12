@@ -43,7 +43,8 @@ async function bootstrap(): Promise<void> {
   }
 
   await app.listen(config.port, config.host);
-  logger.log(`agent-daemon listening on ws://${config.host}:${config.port}/`);
+  const address = app.getHttpServer().address() as { address: string; port: number };
+  logger.log(`agent-daemon listening on ws://${address.address}:${address.port}/`);
 }
 
 if (
