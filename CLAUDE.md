@@ -73,9 +73,8 @@ change, `README.md` for an operator-facing one). Then:
 
 Still ask first for force-pushes, history rewrites, deleting branches,
 anything that ends daemon sessions, and work beyond what was asked. When
-the work is a feature from `features/`, the manager moves its status when
-your turn ends; commit and push before the turn ends, never edit the
-status yourself.
+the work is a feature from `features/`, its report and status change are
+part of the work: commit and push them with it (see Features).
 
 ## You may be running inside this system
 
@@ -100,11 +99,24 @@ agent-manager, and agents started from it work on this very code
 ## Features
 
 Units of work live in `features/<slug>.md` in each repository
-(frontmatter: title, status, priority, dependsOn; body is the spec). The
-manager owns the `status` field while it moves a feature through
-`queued` and `in-progress`; never edit that field, and do not create or
-edit feature files unless asked to. The convention is specified in
-`../agent-manager/docs/design.md` (Features).
+(frontmatter: title, status, priority, dependsOn; body is the spec,
+followed by the conversation about it). Nothing queues them: a human
+asks you, in the conversation, to work on one or more of them, possibly
+with caveats. When asked:
+
+- read the whole file first; earlier `## Report` and `## Response`
+  sections are the feature's history and the human's answers to it;
+- set `status: in-progress` when you start;
+- when finished, append `## Report (YYYY-MM-DD)` with what you changed,
+  what you verified and what you left open, and set `status: review`;
+  if you cannot or should not continue, say why in the report and set
+  `status: blocked`;
+- commit the file with the work; never edit the other frontmatter
+  fields, and do not create or edit feature files otherwise unless asked.
+
+The human reads the report in the manager, answers under `## Response`
+and sets the status back to `planned`, or marks it `done`. The
+convention is specified in `../agent-manager/docs/design.md` (Features).
 
 ## Local environment
 
