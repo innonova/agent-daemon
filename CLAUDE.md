@@ -55,6 +55,35 @@ run in a sandbox that forbids that.
 - Prettier reformats aggressively; do not rely on exact-text matches of
   source you have not just read.
 
+## You may be running inside this system
+
+These three repositories are registered as one project in the installed
+agent-manager, and agents started from it work on this very code
+(dogfooding). Keep that in mind:
+
+- The installed `agent-daemon` user service holds your own session.
+  `npm run install:service` in `agent-daemon`, `systemctl --user restart
+  agent-daemon` and a reboot end every session, including yours. Do not
+  do that; leave it to a human. Building, unit tests and `test:e2e` are
+  fine: they use ephemeral ports and their own state directories.
+- Restarting the installed `agent-manager` (`npm run install:service` in
+  `agent-manager`) is safe: agents live in the daemon and are re-adopted.
+- `agent-manager-ui`'s Playwright suite starts its own daemon and manager
+  on the fixed port 4299; only one run at a time on this machine.
+- One writing agent per repository. Other repositories of the project are
+  reachable at the sibling paths (`../agent-daemon`, `../agent-manager`,
+  `../agent-manager-ui`); prefer editing them only when the task needs it,
+  and say so in your summary.
+
+## Features
+
+Units of work live in `features/<slug>.md` in each repository
+(frontmatter: title, status, priority, dependsOn; body is the spec). The
+manager owns the `status` field while it moves a feature through
+`queued` and `in-progress`; never edit that field, and do not create or
+edit feature files unless asked to. The convention is specified in
+`../agent-manager/docs/design.md` (Features).
+
 ## Local environment
 
 Claude Code, Codex and Copilot CLI are installed and logged in on this box,
