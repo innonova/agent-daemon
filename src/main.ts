@@ -16,7 +16,8 @@ export async function createApp(
     logger: options.quiet ? false : ['log', 'warn', 'error'],
   });
   app.useWebSocketAdapter(new WsAdapter(app, { messageParser }));
-  app.enableShutdownHooks();
+  // Deliberately no enableShutdownHooks(): Nest would treat SIGHUP, our
+  // reload signal, as a shutdown. Signals are handled explicitly below.
   return app;
 }
 
@@ -43,11 +44,29 @@ async function bootstrap(): Promise<void> {
         logger.error(`profile reload failed: ${err.message}`),
       );
   });
+
+  let shuttingDown = false;
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
-    process.once(sig, () => {
+    process.on(sig, () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
       logger.log(`${sig} received, shutting down`);
-      app.get(SessionsService).terminateAll();
-      void app.close().finally(() => process.exit(0));
+      // Whatever happens below, the process ends.
+      setTimeout(() => process.exit(0), 15_000).unref();
+      void app
+        .get(SessionsService)
+        .terminateAll()
+        .then(() => {
+          // app.close() waits for open connections; websockets never end on
+          // their own, so drop them first.
+          const server = app.getHttpServer() as {
+            closeAllConnections?: () => void;
+          };
+          server.closeAllConnections?.();
+          return app.close();
+        })
+        .catch((err: Error) => logger.error(`shutdown error: ${err.message}`))
+        .finally(() => process.exit(0));
     });
   }
 

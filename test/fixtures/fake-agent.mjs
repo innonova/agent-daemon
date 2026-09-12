@@ -1,5 +1,6 @@
 // A stand-in for an agent CLI: newline-delimited JSON in, newline-delimited
 // JSON out, plus knobs to produce stderr, huge lines, partial lines, exits.
+import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 
 const out = (obj) => process.stdout.write(JSON.stringify(obj) + '\n');
@@ -48,6 +49,26 @@ rl.on('line', (line) => {
       });
       out({ type: 'trapped' });
       break;
+    case 'pause-stdin':
+      process.stdin.pause();
+      setInterval(() => {}, 1000); // a paused stdin no longer keeps the loop alive
+      out({ type: 'paused' });
+      break;
+    case 'orphan': {
+      // leave a grandchild holding our stdout open, then exit
+      const kid = spawn(
+        process.execPath,
+        ['-e', 'setInterval(() => {}, 1000)'],
+        {
+          stdio: ['ignore', 'inherit', 'inherit'],
+          detached: true,
+        },
+      );
+      kid.unref();
+      out({ type: 'orphaned', pid: kid.pid });
+      process.exit(0);
+      break;
+    }
     case 'exit':
       process.exit(msg.code ?? 0);
       break;

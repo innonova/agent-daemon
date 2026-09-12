@@ -1,7 +1,10 @@
 /**
- * Splits a byte stream into lines. Bounded: once the pending partial line
- * exceeds `maxBytes` it is discarded and `onOverflow` is called with the
- * number of bytes dropped so far; splitting resumes at the next newline.
+ * Splits a byte stream into lines on `\n` only; bytes are otherwise passed
+ * through untouched. Bounded: once the pending partial line exceeds
+ * `maxBytes` it is discarded, `onOverflow(null)` is called immediately, and
+ * when the line finally ends (or the stream does) `onOverflow(total)` is
+ * called with the number of bytes dropped. Splitting resumes at the next
+ * newline.
  */
 export class LineSplitter {
   private chunks: Buffer[] = [];
@@ -12,7 +15,7 @@ export class LineSplitter {
   constructor(
     private readonly maxBytes: number,
     private readonly onLine: (line: string) => void,
-    private readonly onOverflow: (droppedBytes: number) => void,
+    private readonly onOverflow: (droppedBytes: number | null) => void,
   ) {}
 
   push(chunk: Buffer): void {
@@ -49,6 +52,7 @@ export class LineSplitter {
       this.dropped = this.pending + part.length;
       this.chunks = [];
       this.pending = 0;
+      this.onOverflow(null);
       return;
     }
     this.chunks.push(part);
@@ -60,13 +64,12 @@ export class LineSplitter {
       this.reportDrop();
       return;
     }
-    let line =
+    const line =
       this.chunks.length === 1
         ? this.chunks[0].toString('utf8')
         : Buffer.concat(this.chunks).toString('utf8');
     this.chunks = [];
     this.pending = 0;
-    if (line.endsWith('\r')) line = line.slice(0, -1);
     this.onLine(line);
   }
 

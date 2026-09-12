@@ -16,7 +16,6 @@ import { toPublicProfile } from '../profiles/profile.js';
 import { ProfilesService } from '../profiles/profiles.service.js';
 import type { LogRecord } from '../sessions/session-log.js';
 import { SessionError } from '../sessions/session.js';
-import type { SessionRecord } from '../sessions/session.js';
 import { SessionsService } from '../sessions/sessions.service.js';
 import { CLIENT_FRAME_TYPES } from './protocol.js';
 import type {
@@ -55,8 +54,9 @@ export function messageParser(data: unknown): { event: string; data: unknown } {
   return { event: type, data: frame };
 }
 
-type Attachment =
-  { state: 'replaying'; buffer: LogRecord[] } | { state: 'live' };
+interface Attachment {
+  state: 'replaying' | 'live';
+}
 
 interface Connection {
   attachments: Map<string, Attachment>;
@@ -64,6 +64,11 @@ interface Connection {
 
 type Frame<K extends keyof ClientFrames> = ClientFrames[K] & { ref?: Ref };
 
+/**
+ * The websocket side of the protocol. Every frame leaving the daemon goes
+ * through `send`, which enforces the slow-consumer bound; handlers return
+ * nothing to Nest so its own envelope never reaches a client.
+ */
 @WebSocketGateway({ path: '/' })
 export class AgentGateway
   implements
@@ -117,117 +122,146 @@ export class AgentGateway
   // ---- requests -----------------------------------------------------------
 
   @SubscribeMessage('hello')
-  hello(@MessageBody() f: Frame<'hello'>): DaemonFrame {
-    if (f.protocol !== PROTOCOL_VERSION) {
-      return this.error(
-        f.ref,
-        'unsupported-protocol',
-        `this daemon speaks protocol ${PROTOCOL_VERSION}`,
-      );
-    }
-    return {
-      type: 'welcome',
-      ref: f.ref,
-      protocol: PROTOCOL_VERSION,
-      version: VERSION,
-      profiles: this.profiles.list().map(toPublicProfile),
-      sessions: this.sessions.list(),
-    };
+  hello(
+    @ConnectedSocket() client: WebSocket,
+    @MessageBody() f: Frame<'hello'>,
+  ): void {
+    this.handle(client, f, () => {
+      if (f.protocol !== PROTOCOL_VERSION) {
+        throw new SessionError(
+          'unsupported-protocol',
+          `this daemon speaks protocol ${PROTOCOL_VERSION}`,
+        );
+      }
+      return {
+        type: 'welcome',
+        protocol: PROTOCOL_VERSION,
+        version: VERSION,
+        profiles: this.profiles.list().map(toPublicProfile),
+        sessions: this.sessions.list(),
+      };
+    });
   }
 
   @SubscribeMessage('profiles.list')
-  profilesList(@MessageBody() f: Frame<'profiles.list'>): DaemonFrame {
-    return {
+  profilesList(
+    @ConnectedSocket() client: WebSocket,
+    @MessageBody() f: Frame<'profiles.list'>,
+  ): void {
+    this.handle(client, f, () => ({
       type: 'profiles',
-      ref: f.ref,
       profiles: this.profiles.list().map(toPublicProfile),
-    };
+    }));
   }
 
   @SubscribeMessage('profiles.reload')
-  async profilesReload(
+  profilesReload(
+    @ConnectedSocket() client: WebSocket,
     @MessageBody() f: Frame<'profiles.reload'>,
-  ): Promise<DaemonFrame> {
-    const profiles = await this.profiles.reload();
-    return {
+  ): void {
+    this.handle(client, f, async () => ({
       type: 'profiles',
-      ref: f.ref,
-      profiles: profiles.map(toPublicProfile),
-    };
+      profiles: (await this.profiles.reload()).map(toPublicProfile),
+    }));
   }
 
   @SubscribeMessage('sessions.list')
-  sessionsList(@MessageBody() f: Frame<'sessions.list'>): DaemonFrame {
-    return { type: 'sessions', ref: f.ref, sessions: this.sessions.list() };
+  sessionsList(
+    @ConnectedSocket() client: WebSocket,
+    @MessageBody() f: Frame<'sessions.list'>,
+  ): void {
+    this.handle(client, f, () => ({
+      type: 'sessions',
+      sessions: this.sessions.list(),
+    }));
   }
 
   @SubscribeMessage('session.get')
-  sessionGet(@MessageBody() f: Frame<'session.get'>): DaemonFrame {
-    return this.guard(f, () => ({
+  sessionGet(
+    @ConnectedSocket() client: WebSocket,
+    @MessageBody() f: Frame<'session.get'>,
+  ): void {
+    this.handle(client, f, () => ({
       type: 'session',
-      ref: f.ref,
       session: this.sessions.get(f.id).record,
     }));
   }
 
   @SubscribeMessage('session.start')
-  async sessionStart(
+  sessionStart(
     @ConnectedSocket() client: WebSocket,
     @MessageBody() f: Frame<'session.start'>,
-  ): Promise<DaemonFrame> {
-    let session: SessionRecord;
-    try {
-      session = this.sessions.start(f);
-    } catch (err) {
-      return this.errorFrom(f.ref, err);
-    }
-    if (f.attach) {
-      await this.attach(client, session.id, f.replay ?? false);
-    }
-    return { type: 'session.started', ref: f.ref, session };
+  ): void {
+    this.handle(client, f, async () => {
+      const replay = this.parseReplay(f.replay);
+      const session = this.sessions.start(f);
+      if (f.attach) {
+        const result = await this.attach(client, session.id, replay);
+        if (result === null)
+          throw new SessionError(
+            'cancelled',
+            'attachment was cancelled before it completed',
+          );
+      }
+      return { type: 'session.started', session };
+    });
   }
 
   @SubscribeMessage('session.attach')
-  async sessionAttach(
+  sessionAttach(
     @ConnectedSocket() client: WebSocket,
     @MessageBody() f: Frame<'session.attach'>,
-  ): Promise<DaemonFrame> {
-    try {
-      const lastSeq = await this.attach(client, f.id, f.replay ?? false);
+  ): void {
+    this.handle(client, f, async () => {
+      const lastSeq = await this.attach(
+        client,
+        f.id,
+        this.parseReplay(f.replay),
+      );
+      if (lastSeq === null)
+        throw new SessionError(
+          'cancelled',
+          'attachment was cancelled before it completed',
+        );
       return {
         type: 'session.attached',
-        ref: f.ref,
         session: this.sessions.get(f.id).record,
         lastSeq,
       };
-    } catch (err) {
-      return this.errorFrom(f.ref, err, f.id);
-    }
+    });
   }
 
   @SubscribeMessage('session.detach')
   sessionDetach(
     @ConnectedSocket() client: WebSocket,
     @MessageBody() f: Frame<'session.detach'>,
-  ): DaemonFrame {
-    this.detach(client, f.id);
-    return { type: 'session.detached', ref: f.ref, id: f.id };
+  ): void {
+    this.handle(client, f, () => {
+      this.detach(client, f.id);
+      return { type: 'session.detached', id: f.id };
+    });
   }
 
   @SubscribeMessage('session.input')
-  sessionInput(@MessageBody() f: Frame<'session.input'>): DaemonFrame {
-    return this.guard(f, () => {
+  sessionInput(
+    @ConnectedSocket() client: WebSocket,
+    @MessageBody() f: Frame<'session.input'>,
+  ): void {
+    this.handle(client, f, async () => {
       const line = typeof f.data === 'string' ? f.data : JSON.stringify(f.data);
       if (line === undefined)
         throw new SessionError('invalid-input', '"data" is required');
-      this.sessions.get(f.id).input(line);
-      return { type: 'ok', ref: f.ref };
+      await this.sessions.get(f.id).input(line);
+      return { type: 'ok' };
     });
   }
 
   @SubscribeMessage('session.signal')
-  sessionSignal(@MessageBody() f: Frame<'session.signal'>): DaemonFrame {
-    return this.guard(f, () => {
+  sessionSignal(
+    @ConnectedSocket() client: WebSocket,
+    @MessageBody() f: Frame<'session.signal'>,
+  ): void {
+    this.handle(client, f, () => {
       if (!['SIGINT', 'SIGTERM', 'SIGKILL'].includes(f.signal)) {
         throw new SessionError(
           'invalid-signal',
@@ -235,109 +269,144 @@ export class AgentGateway
         );
       }
       this.sessions.get(f.id).signal(f.signal);
-      return { type: 'ok', ref: f.ref };
+      return { type: 'ok' };
     });
   }
 
   @SubscribeMessage('session.end-input')
-  sessionEndInput(@MessageBody() f: Frame<'session.end-input'>): DaemonFrame {
-    return this.guard(f, () => {
+  sessionEndInput(
+    @ConnectedSocket() client: WebSocket,
+    @MessageBody() f: Frame<'session.end-input'>,
+  ): void {
+    this.handle(client, f, () => {
       this.sessions.get(f.id).endInput();
-      return { type: 'ok', ref: f.ref };
+      return { type: 'ok' };
     });
   }
 
   @SubscribeMessage('session.remove')
-  sessionRemove(@MessageBody() f: Frame<'session.remove'>): DaemonFrame {
-    return this.guard(f, () => {
+  sessionRemove(
+    @ConnectedSocket() client: WebSocket,
+    @MessageBody() f: Frame<'session.remove'>,
+  ): void {
+    this.handle(client, f, () => {
       this.sessions.remove(f.id);
-      for (const client of this.attached.get(f.id) ?? []) {
-        this.connections.get(client)?.attachments.delete(f.id);
+      for (const other of this.attached.get(f.id) ?? []) {
+        this.connections.get(other)?.attachments.delete(f.id);
       }
       this.attached.delete(f.id);
-      return { type: 'ok', ref: f.ref };
+      this.broadcast({ type: 'session.removed', id: f.id });
+      return { type: 'ok' };
     });
   }
 
   @SubscribeMessage('__unknown')
-  unknown(@MessageBody() f: { type: string; ref?: Ref }): DaemonFrame {
-    return this.error(f.ref, 'unknown-type', `unknown frame type "${f.type}"`);
+  unknown(
+    @ConnectedSocket() client: WebSocket,
+    @MessageBody() f: { type: string; ref?: Ref },
+  ): void {
+    this.send(client, {
+      type: 'error',
+      ref: f.ref,
+      code: 'unknown-type',
+      message: `unknown frame type "${f.type}"`,
+    });
   }
 
   @SubscribeMessage('__malformed')
   malformed(
+    @ConnectedSocket() client: WebSocket,
     @MessageBody() f: { reason: string; frame?: { ref?: Ref } },
-  ): DaemonFrame {
-    return this.error(f.frame?.ref, 'malformed', f.reason);
+  ): void {
+    this.send(client, {
+      type: 'error',
+      ref: f.frame?.ref,
+      code: 'malformed',
+      message: f.reason,
+    });
   }
 
   // ---- attachment & output ------------------------------------------------
 
+  private parseReplay(replay: unknown): ReplayOption {
+    if (replay === undefined || replay === null || replay === false)
+      return false;
+    if (replay === true) return true;
+    if (
+      typeof replay === 'object' &&
+      Number.isSafeInteger((replay as { fromSeq?: unknown }).fromSeq)
+    ) {
+      return { fromSeq: (replay as { fromSeq: number }).fromSeq };
+    }
+    throw new SessionError(
+      'invalid-request',
+      '"replay" must be a boolean or { fromSeq: integer }',
+    );
+  }
+
   /**
-   * Attaches `client` to a session, optionally replaying the log first.
-   * Live output arriving during replay is buffered and flushed afterwards,
-   * so the client sees a contiguous `seq`. Returns the last seq sent.
+   * Attaches `client` to a session. With replay, the log is read from disk
+   * in rounds until the reader has caught up with the session's `lastSeq`,
+   * at which point the attachment switches to live output in the same
+   * synchronous step, so nothing is skipped or duplicated and nothing is
+   * buffered in memory. Returns the last seq delivered (or the session's
+   * boundary when nothing was), or null if the attachment was cancelled by
+   * a detach, a re-attach or a disconnect while replaying.
    */
   private async attach(
     client: WebSocket,
     id: string,
     replay: ReplayOption,
-  ): Promise<number> {
+  ): Promise<number | null> {
     const session = this.sessions.get(id);
     const conn = this.connections.get(client);
     if (!conn) throw new SessionError('closed', 'connection is closed');
     if (conn.attachments.has(id)) {
-      // Re-attaching is a no-op unless replay is requested; then detach and redo.
       if (!replay) return session.record.lastSeq;
       this.detach(client, id);
     }
-    if (
-      typeof replay === 'object' &&
-      (replay === null || !Number.isInteger(replay.fromSeq))
-    ) {
-      throw new SessionError(
-        'invalid-request',
-        '"replay" must be a boolean or { fromSeq: integer }',
-      );
-    }
-    const fromSeq =
-      replay === true
-        ? 1
-        : replay === false
-          ? Number.MAX_SAFE_INTEGER
-          : Math.max(1, replay.fromSeq);
-    const attachment: Attachment = replay
-      ? { state: 'replaying', buffer: [] }
-      : { state: 'live' };
+    const attachment: Attachment = { state: replay ? 'replaying' : 'live' };
     conn.attachments.set(id, attachment);
     let set = this.attached.get(id);
     if (!set) this.attached.set(id, (set = new Set()));
     set.add(client);
+    const alive = () =>
+      conn.attachments.get(id) === attachment &&
+      client.readyState === client.OPEN;
 
-    let lastSeq = fromSeq - 1;
-    if (attachment.state === 'replaying') {
-      try {
-        for await (const record of session.read(fromSeq)) {
-          if (conn.attachments.get(id) !== attachment) return lastSeq; // detached meanwhile
-          await this.waitForDrain(client);
+    if (!replay) return session.record.lastSeq;
+
+    let next = replay === true ? 1 : Math.max(1, replay.fromSeq);
+    let lastSent = Math.min(next - 1, session.record.lastSeq);
+    try {
+      for (;;) {
+        const target = session.record.lastSeq;
+        if (next > target) {
+          // Synchronous with the check: no record can be emitted in between.
+          attachment.state = 'live';
+          return lastSent;
+        }
+        for await (const record of session.read(next, target)) {
+          if (!alive()) return null;
+          await this.waitForDrain(client, alive);
+          if (!alive()) return null;
           this.send(client, { type: 'session.output', id, ...record });
-          lastSeq = record.seq;
+          lastSent = record.seq;
+          next = record.seq + 1;
         }
-        if (conn.attachments.get(id) !== attachment) return lastSeq;
-        for (const record of attachment.buffer) {
-          if (record.seq > lastSeq) {
-            this.send(client, { type: 'session.output', id, ...record });
-            lastSeq = record.seq;
-          }
-        }
-      } finally {
-        if (conn.attachments.get(id) === attachment)
-          conn.attachments.set(id, { state: 'live' });
+        if (!alive()) return null;
+        // Fewer records on disk than seq handed out: logging failed at some
+        // point. The hole is unavoidable; move past it.
+        if (next <= target) next = target + 1;
       }
-    } else {
-      lastSeq = session.record.lastSeq;
+    } catch (err) {
+      if (conn.attachments.get(id) === attachment) this.detach(client, id);
+      this.logger.error(`replay of ${id} failed: ${(err as Error).message}`);
+      throw new SessionError(
+        'replay-failed',
+        `could not read the session log: ${(err as Error).message}`,
+      );
     }
-    return lastSeq;
   }
 
   private detach(client: WebSocket, id: string): void {
@@ -361,82 +430,97 @@ export class AgentGateway
     if (!clients) return;
     for (const client of clients) {
       const attachment = this.connections.get(client)?.attachments.get(id);
-      if (!attachment) continue;
-      if (attachment.state === 'replaying') {
-        attachment.buffer.push(record);
-        continue;
-      }
-      if (client.bufferedAmount > this.config.slowConsumerBytes) {
-        this.logger.warn(
-          `detaching slow consumer (${client.bufferedAmount} bytes queued)`,
-        );
-        this.detachAll(client);
-        this.send(client, {
-          type: 'error',
-          code: 'slow-consumer',
-          message:
-            'client is not reading fast enough; detached from all sessions',
-        });
-        continue;
-      }
+      // A replaying attachment picks the record up from disk.
+      if (!attachment || attachment.state !== 'live') continue;
       this.send(client, { type: 'session.output', id, ...record });
     }
   }
 
   /** Replay is pull-based, so instead of dropping we wait for the socket to drain. */
-  private async waitForDrain(client: WebSocket): Promise<void> {
+  private async waitForDrain(
+    client: WebSocket,
+    alive: () => boolean,
+  ): Promise<void> {
     const limit = this.config.slowConsumerBytes / 4;
-    while (client.bufferedAmount > limit && client.readyState === client.OPEN) {
+    while (client.bufferedAmount > limit && alive()) {
       await new Promise((r) => setTimeout(r, 5));
     }
   }
 
   // ---- helpers ------------------------------------------------------------
 
+  /**
+   * Runs a request handler and sends its reply with the request's ref, or
+   * an `error` frame. Every failure path ends in a frame the client can
+   * correlate; nothing propagates to Nest.
+   */
+  private handle<K extends keyof ClientFrames>(
+    client: WebSocket,
+    f: Frame<K>,
+    fn: () => DaemonFrame | Promise<DaemonFrame>,
+  ): void {
+    const ref = f?.ref;
+    const id = (f as { id?: unknown })?.id;
+    const fail = (err: unknown) => {
+      if (err instanceof SessionError) {
+        this.send(client, {
+          type: 'error',
+          ref,
+          id: typeof id === 'string' ? id : undefined,
+          code: err.code,
+          message: err.message,
+        });
+        return;
+      }
+      this.logger.error(err);
+      this.send(client, {
+        type: 'error',
+        ref,
+        code: 'internal',
+        message: (err as Error)?.message ?? String(err),
+      });
+    };
+    try {
+      const result = fn();
+      if (result instanceof Promise) {
+        result.then(
+          (frame) => this.send(client, { ...frame, ref } as DaemonFrame),
+          fail,
+        );
+      } else {
+        this.send(client, { ...result, ref } as DaemonFrame);
+      }
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  /**
+   * The single path for frames to a client. A client with more than the
+   * slow-consumer bound queued is not reading; it is detached from every
+   * session and its socket closed, since even control frames cannot reach it.
+   */
   private send(client: WebSocket, frame: DaemonFrame): void {
-    if (client.readyState === client.OPEN) client.send(JSON.stringify(frame));
+    if (client.readyState !== client.OPEN) return;
+    if (client.bufferedAmount > this.config.slowConsumerBytes) {
+      this.logger.warn(
+        `dropping slow consumer (${client.bufferedAmount} bytes queued)`,
+      );
+      this.detachAll(client);
+      client.send(
+        JSON.stringify({
+          type: 'error',
+          code: 'slow-consumer',
+          message: 'client is not reading fast enough; connection closed',
+        } satisfies DaemonFrame),
+      );
+      client.close(1008, 'slow consumer');
+      return;
+    }
+    client.send(JSON.stringify(frame));
   }
 
   private broadcast(frame: DaemonFrame): void {
-    const data = JSON.stringify(frame);
-    for (const client of this.connections.keys()) {
-      if (client.readyState === client.OPEN) client.send(data);
-    }
-  }
-
-  private guard(
-    f: { ref?: Ref; id?: string },
-    fn: () => DaemonFrame,
-  ): DaemonFrame {
-    try {
-      return fn();
-    } catch (err) {
-      return this.errorFrom(f.ref, err, f.id);
-    }
-  }
-
-  private errorFrom(
-    ref: Ref | undefined,
-    err: unknown,
-    id?: string,
-  ): DaemonFrame {
-    if (err instanceof SessionError)
-      return this.error(ref, err.code, err.message, id);
-    this.logger.error(err);
-    return this.error(
-      ref,
-      'internal',
-      (err as Error).message ?? String(err),
-      id,
-    );
-  }
-
-  private error(
-    ref: Ref | undefined,
-    code: string,
-    message: string,
-    id?: string,
-  ): DaemonFrame {
-    return { type: 'error', ref, id, code, message };
+    for (const client of this.connections.keys()) this.send(client, frame);
   }
 }

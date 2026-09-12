@@ -1,11 +1,18 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { SessionLog } from './session-log.js';
+import { LogIndex, SessionLog } from './session-log.js';
 
-async function collect(p: string, from?: number) {
+async function collect(
+  p: string,
+  from = 1,
+  until?: number,
+  offset?: number,
+  index?: LogIndex,
+) {
   const out = [];
-  for await (const r of SessionLog.read(p, from)) out.push(r);
+  for await (const r of SessionLog.read(p, from, until, offset, index))
+    out.push(r);
   return out;
 }
 
@@ -50,6 +57,36 @@ describe('SessionLog', () => {
     expect(await collect(path.join(path.dirname(file), 'nope.ndjson'))).toEqual(
       [],
     );
+  });
+
+  it('stops at untilSeq and resumes from an indexed offset', async () => {
+    const index = new LogIndex();
+    const log = new SessionLog(file, index);
+    for (let i = 1; i <= 1000; i++)
+      log.append({ seq: i, t: i, s: 'out', d: 'x'.repeat(50) });
+    log.close();
+    expect((await collect(file, 1, 3)).map((r) => r.seq)).toEqual([1, 2, 3]);
+    const offset = index.offsetFor(900);
+    expect(offset).toBeGreaterThan(0);
+    const tail = await collect(file, 900, undefined, offset);
+    expect(tail.map((r) => r.seq)).toEqual(
+      Array.from({ length: 101 }, (_, i) => 900 + i),
+    );
+    const built = new LogIndex();
+    await collect(file, 1, undefined, 0, built);
+    expect(built.offsetFor(900)).toBe(offset);
+    expect(built.offsetFor(1)).toBe(0);
+  });
+
+  it('recovers the last complete seq from the tail, ignoring a torn line', async () => {
+    expect(await SessionLog.lastSeq(file)).toBe(0);
+    const log = new SessionLog(file);
+    for (let i = 1; i <= 5000; i++)
+      log.append({ seq: i, t: i, s: 'out', d: 'y'.repeat(100) });
+    log.close();
+    expect(await SessionLog.lastSeq(file)).toBe(5000);
+    fs.appendFileSync(file, '{"seq":5001,"t":1,"s":"out","d":"tor');
+    expect(await SessionLog.lastSeq(file)).toBe(5000);
   });
 
   it('refuses to append after close', () => {

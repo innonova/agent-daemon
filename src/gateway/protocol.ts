@@ -88,5 +88,6 @@ export type DaemonFrame =
       exitedAt: number | null;
     }
   | { type: 'session.changed'; session: SessionRecord }
+  | { type: 'session.removed'; id: string }
   | { type: 'profiles.changed'; profiles: PublicProfile[] }
   | { type: 'error'; ref?: Ref; id?: string; code: string; message: string };

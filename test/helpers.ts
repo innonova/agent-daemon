@@ -65,6 +65,7 @@ export async function startDaemon(
       stateDir: dirs.stateDir,
       maxLineBytes: opts.maxLineBytes ?? 4096,
       slowConsumerBytes: 1024 * 1024,
+      pipeGraceMs: 300,
     },
     { quiet: !process.env.TEST_VERBOSE },
   );
@@ -175,9 +176,11 @@ export class Client {
   }
 
   close(): Promise<void> {
+    if (this.ws.readyState === WebSocket.CLOSED) return Promise.resolve();
     return new Promise((resolve) => {
       this.ws.once('close', () => resolve());
-      this.ws.close();
+      if (this.ws.readyState === WebSocket.OPEN) this.ws.close();
+      else if (this.ws.readyState === WebSocket.CONNECTING) this.ws.terminate();
     });
   }
 }

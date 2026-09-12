@@ -115,7 +115,7 @@ A session is one child process started from a profile. Its record:
   "cwd": "/home/me/project",
   "env": {},                     // the overlay only, not the inherited environment
   "loginShell": false,
-  "pid": 12345,                  // null once exited or when never spawned
+  "pid": 12345,                  // kept after exit for correlation; null if never spawned
   "state": "running",            // or "exited"
   "exitCode": null,
   "signal": null,
@@ -135,9 +135,18 @@ Exited sessions are retained, with their logs, until a client removes them.
 The daemon applies no retention policy; housekeeping is a client concern.
 
 When the daemon starts, any session recorded as `running` in the state
-directory is marked `exited` with reason `daemon-restart`. Its log stays, so
-a client can inspect it and start a fresh session with the agent's own
-resume arguments if it wants to continue.
+directory is marked `exited` with reason `daemon-restart`, and its `lastSeq`
+is recovered from the log itself (meta.json is not rewritten per record).
+Its log stays, so a client can inspect it and start a fresh session with the
+agent's own resume arguments if it wants to continue. A session directory
+whose meta.json is unreadable is ignored but its id stays reserved.
+
+A session is only reported as started once its directory, log and initial
+record exist on disk (`storage-error` otherwise). Later disk failures never
+take the session or the daemon down: a log write that fails is retried on
+every following record, and the session emits a stderr-style record when
+logging fails and again when it recovers, so clients know replay has a
+hole. A meta.json write that fails is logged; the next state change retries.
 
 ### On disk
 
@@ -163,6 +172,11 @@ Log record:
 
 Recording stdin lets a client rebuild the whole conversation from the log
 alone. The daemon keeps no line history in memory; replay reads the file.
+Writes are synchronous and complete, so the file always matches the
+sequence numbers handed out. An in-memory sparse index (one entry per 256
+records) maps `seq` to byte offset so attaching near the tail of a large
+log does not scan the whole file; for sessions restored from disk the index
+is built on the first read.
 
 ## Websocket protocol
 
@@ -186,9 +200,9 @@ carries the same `ref`. Events that are not replies have no `ref`.
 | `profiles.reload` | | `profiles { profiles[] }`, plus `profiles.changed` event to all |
 | `sessions.list` | | `sessions { sessions[] }` |
 | `session.start` | `profile, args?, argsReplace?, cwd?, env?, label?, id?, attach?: bool, replay?` | `session.started { session }` |
-| `session.attach` | `id, replay?: false \| true \| { fromSeq }` | replayed `session.output` frames, then `session.attached { session, lastSeq }` |
+| `session.attach` | `id, replay?: false \| true \| { fromSeq }` | replayed `session.output` frames, then `session.attached { session, lastSeq }`; `cancelled` if detached, re-attached or disconnected before replay finished |
 | `session.detach` | `id` | `session.detached { id }` |
-| `session.input` | `id, data` | `ok` |
+| `session.input` | `id, data` | `ok` once the bytes are in the pipe; `stdin-full` if the process has stopped reading; `stdin-error` if the pipe failed |
 | `session.signal` | `id, signal: "SIGINT" \| "SIGTERM" \| "SIGKILL"` | `ok` |
 | `session.end-input` | `id` | `ok` (closes stdin; for one-shot modes) |
 | `session.remove` | `id` | `ok` (only when exited; deletes the log) |
@@ -234,43 +248,80 @@ connection, attached or not, so a client can keep a session list current
 without attaching to everything. `session.output` goes only to attached
 connections.
 
+`session.removed { id }` is broadcast when a session is removed.
+
 Error codes: `malformed`, `unknown-type`, `unsupported-protocol`,
+`invalid-request` (a field has the wrong type; nothing was changed),
 `unknown-profile`, `unknown-session`, `invalid-id`, `duplicate-id`,
 `invalid-input`, `invalid-signal`, `session-not-running`, `session-running`,
-`stdin-closed`, `slow-consumer`, `internal`.
+`stdin-closed`, `stdin-full`, `stdin-error`, `storage-error`,
+`replay-failed`, `cancelled`, `slow-consumer`, `internal`.
 
-Replay: on attach with replay, the daemon streams the log file from the
-requested `seq` as `session.output` frames, buffering live output produced
-meanwhile, then flushes the buffer and sends `session.attached`. From that
-point the client receives live frames. `seq` is contiguous, so a client that
-reconnects asks for `{ fromSeq: lastSeen + 1 }` and misses nothing.
+`session.input` replies `ok` only once the bytes have been handed to the
+pipe. An agent that has stopped reading therefore delays the reply; a
+client that awaits each reply is flow-controlled for free, and one that
+does not is refused with `stdin-full` once the unwritten backlog exceeds
+`AGENT_DAEMON_SLOW_CONSUMER_BYTES`. The `in` record is written before the
+attempt; if the pipe then fails, an `err` record says so.
 
-Backpressure: if a client's socket buffer grows beyond a threshold
-(`AGENT_DAEMON_SLOW_CONSUMER_BYTES`, default 64 MB) while receiving live
-output, the daemon drops that client's attachments and sends an `error`
-with code `slow-consumer`; it never blocks or buffers unboundedly on behalf
-of a client. During replay, which is pull-based, the daemon instead pauses
-reading the log until the socket drains. The log on disk remains
-authoritative and the client may reattach with replay.
+Replay: on attach with replay, the daemon reads the log from the requested
+`seq` in rounds. Each round reads up to the session's `lastSeq` at the time
+the round starts; when a round starts with nothing left to read, the
+attachment switches to live in the same synchronous step, so no record is
+skipped or duplicated and nothing is buffered in memory. Live output that
+arrives during replay is simply picked up from disk by the next round.
+`session.attached.lastSeq` is the last record delivered, or the session's
+boundary when the requested cursor was beyond it. `seq` is contiguous, so a
+client that reconnects asks for `{ fromSeq: lastSeen + 1 }` and misses
+nothing.
+
+Backpressure: every frame to a client goes through one path that checks
+the socket's unsent bytes. Past `AGENT_DAEMON_SLOW_CONSUMER_BYTES` (default
+64 MB) the client is not reading: it is detached from every session, sent
+an `error` with code `slow-consumer`, and its connection is closed (code
+1008), since even control frames could not reach it. The daemon never
+blocks or buffers unboundedly on behalf of a client. During replay, which is
+pull-based, the daemon instead pauses reading the log until the socket
+drains. The log on disk remains authoritative and the client may reconnect
+and reattach with replay.
 
 ## Process management
 
 - Children are spawned with `stdio: ['pipe', 'pipe', 'pipe']` and
   `detached: false`. They are in the daemon's process group and die with it,
   which is the intended and accepted behaviour.
-- stdout and stderr are split on `\n`. A final partial line at exit is
-  emitted as a line.
+- stdout and stderr are split on `\n` and otherwise passed through
+  byte-for-byte (a `\r` stays). A final partial line at exit is emitted as
+  a line.
+- The session exits when the child has exited *and* its stdout and stderr
+  have closed, so final output is never lost. If a descendant inherited the
+  pipes and keeps them open, they are closed `AGENT_DAEMON_PIPE_GRACE_MS`
+  (default 10 s) after the child's exit and the session exits then.
 - A single line is limited to 10 MB (`AGENT_DAEMON_MAX_LINE`, bytes). This
   is purely a memory bound against a child that stops emitting newlines; it
   is not expected to trigger with real agents. When exceeded, the buffered
-  bytes are discarded, a record `{"s":"err","d":"agent-daemon: dropped
-  <n> bytes exceeding line limit on <stream>"}` is logged and sent, and
-  reading continues from the next newline.
+  bytes are discarded and an `err` record says so immediately
+  (`agent-daemon: line on <stream> exceeds <n> bytes; dropping it`); when
+  the line finally ends, or the stream does, a second record reports the
+  total (`agent-daemon: dropped <n> bytes exceeding line limit on
+  <stream>`), and reading continues from the next newline.
 - No automatic restart of exited children. Resume is an agent feature the
   client drives through arguments.
-- On `SIGTERM`/`SIGINT` the daemon sends `SIGTERM` to every running child
-  and exits. Their records are rewritten as exited by the next daemon
-  start (`daemon-restart`), since the exit itself is not observed.
+- With `loginShell`, the command line is prefixed with `exec` so the shell
+  replaces itself with the agent; signals and the exit status then refer to
+  the agent, whatever shell is configured.
+- On `SIGTERM`/`SIGINT` the daemon sends `SIGTERM` to every running child,
+  waits up to 5 s, sends `SIGKILL` to whatever is left, records the exits,
+  drops client connections and exits 0. A hard 15 s limit ends the process
+  regardless. Children are in the daemon's process group but nothing else
+  ties their lifetime to it: if the daemon is killed with `SIGKILL`, the
+  systemd cgroup (the unit's default `KillMode=control-group`) is what ends
+  them. Outside systemd, orphans are possible after a hard kill.
+- `SIGHUP` only reloads profiles. Nest's own shutdown hooks are deliberately
+  not enabled, because they would treat `SIGHUP` as a shutdown.
+- Uncaught exceptions and unhandled rejections are logged and the process
+  carries on. A bug in one request must not end every session on the
+  machine.
 
 ## Configuration
 
@@ -282,16 +333,26 @@ All configuration is by environment variable; there is no config file.
 | `AGENT_DAEMON_CONFIG_DIR` | `$XDG_CONFIG_HOME/agent-daemon` (`~/.config/agent-daemon`) | holds `profiles/` |
 | `AGENT_DAEMON_STATE_DIR` | `$XDG_STATE_HOME/agent-daemon` (`~/.local/state/agent-daemon`) | holds `sessions/` |
 | `AGENT_DAEMON_MAX_LINE` | `10485760` | per-line byte limit |
-| `AGENT_DAEMON_SLOW_CONSUMER_BYTES` | `67108864` | unsent bytes before a client is detached |
+| `AGENT_DAEMON_SLOW_CONSUMER_BYTES` | `67108864` | unsent bytes before a client is dropped; also the stdin backlog limit |
+| `AGENT_DAEMON_PIPE_GRACE_MS` | `10000` | how long inherited pipes may stay open after the child exits |
+
+`AGENT_DAEMON_LISTEN` may name a non-loopback address. The daemon does not
+stop you; binding elsewhere than loopback is the operator's decision and
+exposes an unauthenticated interface, which is outside this design.
 
 ## Testing
 
 - `npm test`: unit tests for the line splitter, log, profile parsing and
   config.
-- `npm run test:e2e`: boots the daemon on an ephemeral port with temporary
-  directories and drives every protocol frame against a fake agent
-  (`test/fixtures/fake-agent.mjs`) that can echo, write stderr, emit
-  oversized and partial lines, trap signals and exit on command.
+- `npm run test:e2e`: builds, then boots the daemon in-process on an
+  ephemeral port with temporary directories and drives every protocol frame
+  against a fake agent (`test/fixtures/fake-agent.mjs`) that can echo, write
+  stderr, emit oversized and partial lines, stop reading stdin, leave an
+  orphan holding its pipes, trap signals and exit on command. Covers replay
+  catch-up under load, cancellation, slow consumers, stale sequence
+  recovery and restart marking. `test/process.e2e-spec.ts` runs the built
+  `dist/main.js` as a real process and checks `SIGHUP` reload and `SIGTERM`
+  shutdown.
 - `npm run smoke:agents [claude|codex|copilot]`: opt-in, costs tokens, runs
   one real turn through each installed agent CLI and checks the answer.
 
@@ -333,5 +394,7 @@ output. These belong to the services and UIs built on top.
 - Port 4267, TCP on loopback. No unix socket: TCP is uniform for every
   client and causes less confusion.
 - 10 MB per-line limit as a crash guard only.
+- `pid` stays in the record after exit (the draft said null): it is useful
+  for correlating with system logs and costs nothing.
 - `argsReplace` is supported. Restrictions on what a consumer may start are
   exactly the kind of thing that would later force a daemon change.

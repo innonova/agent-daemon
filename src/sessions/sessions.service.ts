@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { DAEMON_CONFIG } from '../config/config.js';
 import type { DaemonConfig } from '../config/config.js';
 import { ProfilesService } from '../profiles/profiles.service.js';
-import { LogRecord } from './session-log.js';
+import { LogRecord, SessionLog } from './session-log.js';
 import { Session, SessionError, SessionRecord } from './session.js';
 
 export interface StartRequest {
@@ -76,13 +76,13 @@ export class SessionsService
     return path.join(this.config.stateDir, 'sessions');
   }
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
     fs.mkdirSync(this.dir, { recursive: true });
-    this.restoreFromDisk();
+    await this.restoreFromDisk();
   }
 
   /** Any session recorded as running belonged to a previous daemon process. */
-  private restoreFromDisk(): void {
+  private async restoreFromDisk(): Promise<void> {
     let entries: string[] = [];
     try {
       entries = fs.readdirSync(this.dir);
@@ -99,7 +99,12 @@ export class SessionsService
         ) as SessionRecord;
         const session = Session.restore(dir, record);
         if (record.state === 'running') {
-          session.markOrphaned('daemon-restart');
+          // meta.json is not rewritten per record, so take the real
+          // sequence boundary from the log itself.
+          session.markOrphaned(
+            'daemon-restart',
+            Math.max(record.lastSeq, await SessionLog.lastSeq(session.logPath)),
+          );
           orphaned++;
         }
         this.sessions.set(record.id, session);
@@ -156,7 +161,11 @@ export class SessionsService
         env: { ...profile.env, ...req.env },
         loginShell: profile.loginShell,
       },
-      this.config.maxLineBytes,
+      {
+        maxLineBytes: this.config.maxLineBytes,
+        stdinBufferBytes: this.config.slowConsumerBytes,
+        pipeGraceMs: this.config.pipeGraceMs,
+      },
     );
     this.sessions.set(id, session);
     session.on('output', (record) => this.emit('output', id, record));
@@ -180,16 +189,33 @@ export class SessionsService
     this.sessions.delete(id);
   }
 
-  /** Sends SIGTERM to every running child; used on shutdown. */
-  terminateAll(): void {
-    for (const s of this.sessions.values()) {
-      if (s.record.state === 'running') {
-        try {
-          s.signal('SIGTERM');
-        } catch {
-          /* already gone */
-        }
+  /**
+   * Shutdown: SIGTERM every running child, wait up to `graceMs` for them to
+   * exit, SIGKILL the rest, and wait briefly again so their records are
+   * written as exited rather than left for the next start to mark.
+   */
+  async terminateAll(graceMs = 5000): Promise<void> {
+    const running = () =>
+      [...this.sessions.values()].filter((s) => s.record.state === 'running');
+    for (const s of running()) {
+      try {
+        s.signal('SIGTERM');
+      } catch {
+        /* already gone */
       }
     }
+    await Promise.all(running().map((s) => s.waitForExit(graceMs)));
+    const stubborn = running();
+    for (const s of stubborn) {
+      this.logger.warn(
+        `session ${s.record.id} ignored SIGTERM; sending SIGKILL`,
+      );
+      try {
+        s.signal('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    await Promise.all(stubborn.map((s) => s.waitForExit(2000)));
   }
 }

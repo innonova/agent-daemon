@@ -225,6 +225,74 @@ describe('starting sessions', () => {
     expect(ready.env.FAKE_LOGIN).toBe('yes');
   });
 
+  it('turns a synchronous spawn failure into an exited session', async () => {
+    const c = await connect();
+    const started = await c.request<any>({
+      type: 'session.start',
+      profile: 'fake',
+      attach: true,
+      cwd: '/etc/hostname',
+    });
+    expect(started.type).toBe('session.started');
+    const exit = await c.waitFor(
+      (f) => f.type === 'session.exit' && (f as any).id === started.session.id,
+    );
+    expect((exit as any).exitReason).toMatch(/^spawn-error: .*ENOTDIR/);
+    expect(c.outputs(started.session.id).map((f: any) => f.s)).toEqual(['err']);
+    const meta = JSON.parse(
+      fs.readFileSync(
+        path.join(d.stateDir, 'sessions', started.session.id, 'meta.json'),
+        'utf8',
+      ),
+    );
+    expect(meta.state).toBe('exited');
+  });
+
+  it('login shell runs the profile and execs the agent so the session pid is the agent pid', async () => {
+    // A shell that sets something only a login profile would, and does not
+    // tail-exec: only an explicit exec makes the pids match.
+    const shell = path.join(d.stateDir, 'fake-shell.sh');
+    fs.writeFileSync(
+      shell,
+      '#!/bin/sh\nFAKE_LOGIN=from-shell; export FAKE_LOGIN\neval "$2"\necho should-not-print\n',
+      { mode: 0o755 },
+    );
+    const prev = process.env.SHELL;
+    process.env.SHELL = shell;
+    try {
+      d.writeProfile('login2', {
+        command: process.execPath,
+        args: [FAKE_AGENT],
+        loginShell: true,
+      });
+      await (await connect()).request({ type: 'profiles.reload' });
+      const c = await connect();
+      const started = await c.request<any>({
+        type: 'session.start',
+        profile: 'login2',
+        attach: true,
+      });
+      const ready = JSON.parse(
+        (await c.waitForOutput(started.session.id, (o) => o?.type === 'ready'))
+          .d,
+      );
+      expect(ready.pid).toBe(started.session.pid);
+      expect(ready.env.FAKE_LOGIN).toBe('from-shell');
+      await c.request({
+        type: 'session.signal',
+        id: started.session.id,
+        signal: 'SIGTERM',
+      });
+      const exit = await c.waitFor(
+        (f) =>
+          f.type === 'session.exit' && (f as any).id === started.session.id,
+      );
+      expect(exit).toMatchObject({ signal: 'SIGTERM' });
+    } finally {
+      process.env.SHELL = prev;
+    }
+  });
+
   it('broadcasts session.changed to every connection on start and exit', async () => {
     const watcher = await connect();
     const c = await connect();
@@ -242,6 +310,13 @@ describe('starting sessions', () => {
       (f) => f.type === 'session.exit' && (f as any).id === id,
     );
     expect(exit).toMatchObject({ exitCode: 3, signal: null });
+    const exited = await watcher.waitFor(
+      (f) =>
+        f.type === 'session.changed' &&
+        (f as any).session.id === id &&
+        (f as any).session.state === 'exited',
+    );
+    expect((exited as any).session).toMatchObject({ exitCode: 3, lastSeq: 2 });
   });
 });
 
@@ -302,15 +377,20 @@ describe('input and output', () => {
       id,
       data: { cmd: 'big', bytes: 100_000 },
     });
-    const note = await c.waitFor(
+    await c.waitFor(
       (f) =>
         f.type === 'session.output' &&
         (f as any).s === 'err' &&
-        (f as any).id === id,
+        (f as any).d.startsWith('agent-daemon: dropped'),
     );
-    expect((note as any).d).toBe(
+    const notes = c
+      .outputs(id)
+      .filter((f: any) => f.s === 'err')
+      .map((f: any) => f.d);
+    expect(notes).toEqual([
+      'agent-daemon: line on stdout exceeds 4096 bytes; dropping it',
       'agent-daemon: dropped 100000 bytes exceeding line limit on stdout',
-    );
+    ]);
     await c.request({
       type: 'session.input',
       id,
@@ -378,6 +458,35 @@ describe('input and output', () => {
     });
     expect(ok.type).toBe('ok');
     await a.waitForOutput(id, (o) => o?.type === 'echo' && o.data === 'from-b');
+  });
+
+  it('refuses input once the process stops reading stdin', async () => {
+    const c = await connect();
+    const { id } = await startFake(c);
+    await c.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'pause-stdin' },
+    });
+    await c.waitForOutput(id, (o) => o?.type === 'paused');
+    // ok is only sent once bytes reach the pipe, so a client that awaits each
+    // reply is flow-controlled. One that does not gets refused past the limit.
+    const chunk = 'x'.repeat(64 * 1024);
+    for (let i = 0; i < 40; i++)
+      c.sendRaw(
+        JSON.stringify({
+          type: 'session.input',
+          ref: `bulk${i}`,
+          id,
+          data: chunk,
+        }),
+      );
+    const err = await c.waitFor(
+      (f) => f.type === 'error' && (f as any).code === 'stdin-full',
+    );
+    expect(err).toBeTruthy();
+    await c.request({ type: 'session.signal', id, signal: 'SIGKILL' });
+    await c.waitFor((f) => f.type === 'session.exit' && (f as any).id === id);
   });
 
   it('requires data on input and rejects unknown sessions', async () => {
@@ -499,6 +608,123 @@ describe('replay', () => {
     expect(seqs).toEqual(seqs.map((_, i) => i + 1));
   });
 
+  it('closes a client that stops reading live output', async () => {
+    const a = await connect();
+    const { id } = await startFake(a);
+    // a only drives the session; it must not receive the burst itself
+    await a.request({ type: 'session.detach', id });
+    const b = await connect();
+    await b.request({ type: 'session.attach', id });
+    const sock = (b as any).ws._socket as { pause(): void; resume(): void };
+    sock.pause();
+    // one burst far past the 1 MB test threshold, allowing for what loopback
+    // kernel buffers absorb before the daemon's own queue grows
+    await a.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'spam', n: 300_000 },
+    });
+    for (;;) {
+      const got = await a.request<any>({ type: 'session.get', id });
+      if (got.session.lastSeq >= 300_000) break;
+      await sleep(100);
+    }
+    sock.resume();
+    const err = await b.waitFor(
+      (f) => f.type === 'error' && (f as any).code === 'slow-consumer',
+      15000,
+    );
+    expect(err).toBeTruthy();
+    await new Promise<void>((resolve) => (b as any).ws.once('close', resolve));
+    clients.splice(clients.indexOf(b), 1);
+    // the session and other clients are unaffected
+    await a.request({ type: 'session.attach', id });
+    await a.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'echo', data: 'after' },
+    });
+    await a.waitForOutput(id, (o) => o?.type === 'echo' && o.data === 'after');
+  }, 40000);
+
+  it('reports the session boundary for a cursor in the future', async () => {
+    const a = await connect();
+    const { id } = await startFake(a);
+    const b = await connect();
+    const attached = await b.request<any>({
+      type: 'session.attach',
+      id,
+      replay: { fromSeq: 100 },
+    });
+    expect(attached.lastSeq).toBe(1);
+    expect(b.outputs(id)).toEqual([]);
+    await a.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'echo', data: 'x' },
+    });
+    const next = await b.waitFor(
+      (f) => f.type === 'session.output' && (f as any).id === id,
+    );
+    expect((next as any).seq).toBe(2);
+  });
+
+  it('cancels a replay when the client detaches midway', async () => {
+    const a = await connect();
+    const { id } = await startFake(a);
+    await a.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'spam', n: 30000 },
+    });
+    await a.waitForOutput(
+      id,
+      (o) => o?.type === 'spam' && o.i === 29999,
+      20000,
+    );
+    const b = await connect();
+    const attachP = b.request<any>(
+      { type: 'session.attach', id, replay: true },
+      30000,
+    );
+    await b.waitFor(
+      (f) => f.type === 'session.output' && (f as any).id === id,
+      10000,
+    );
+    const detached = await b.request<any>({ type: 'session.detach', id });
+    expect(detached.type).toBe('session.detached');
+    const reply = await attachP;
+    expect(reply).toMatchObject({ type: 'error', code: 'cancelled' });
+    const afterDetach = b.frames.indexOf(detached);
+    expect(
+      b.frames
+        .slice(afterDetach + 1)
+        .filter((f) => f.type === 'session.output'),
+    ).toEqual([]);
+    expect((await b.request<any>({ type: 'sessions.list' })).type).toBe(
+      'sessions',
+    );
+  }, 30000);
+
+  it('an invalid replay option leaves an existing attachment alone', async () => {
+    const a = await connect();
+    const { id } = await startFake(a);
+    const b = await connect();
+    await b.request({ type: 'session.attach', id });
+    expect(
+      await b.request({ type: 'session.attach', id, replay: { fromSeq: 'x' } }),
+    ).toMatchObject({ type: 'error', code: 'invalid-request' });
+    expect(
+      await b.request({ type: 'session.attach', id, replay: 'yes' }),
+    ).toMatchObject({ type: 'error', code: 'invalid-request' });
+    await a.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'echo', data: 'still' },
+    });
+    await b.waitForOutput(id, (o) => o?.type === 'echo' && o.data === 'still');
+  });
+
   it('replays an exited session from disk', async () => {
     const a = await connect();
     const { id } = await startFake(a);
@@ -586,6 +812,28 @@ describe('lifecycle', () => {
     await c.waitFor((f) => f.type === 'session.exit' && (f as any).id === id);
   });
 
+  it('closes pipes a descendant kept open after the child exited', async () => {
+    const c = await connect();
+    const { id } = await startFake(c);
+    await c.request({ type: 'session.input', id, data: { cmd: 'orphan' } });
+    const orphaned = JSON.parse(
+      (await c.waitForOutput(id, (o) => o?.type === 'orphaned')).d,
+    );
+    try {
+      const exit = await c.waitFor(
+        (f) => f.type === 'session.exit' && (f as any).id === id,
+        5000,
+      );
+      expect(exit).toMatchObject({ exitCode: 0 });
+    } finally {
+      try {
+        process.kill(orphaned.pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+  });
+
   it('removes only exited sessions and deletes their directory', async () => {
     const c = await connect();
     const { id } = await startFake(c);
@@ -597,10 +845,14 @@ describe('lifecycle', () => {
     await c.waitFor((f) => f.type === 'session.exit' && (f as any).id === id);
     const dir = path.join(d.stateDir, 'sessions', id);
     expect(fs.existsSync(dir)).toBe(true);
+    const watcher = await connect();
     expect(await c.request({ type: 'session.remove', id })).toMatchObject({
       type: 'ok',
     });
     expect(fs.existsSync(dir)).toBe(false);
+    expect(
+      await watcher.waitFor((f) => f.type === 'session.removed'),
+    ).toMatchObject({ id });
     const list = await c.request<any>({ type: 'sessions.list' });
     expect(list.sessions.map((s: any) => s.id)).not.toContain(id);
     expect(await c.request({ type: 'session.get', id })).toMatchObject({
@@ -709,7 +961,7 @@ describe('daemon restart', () => {
       exitReason: null,
       startedAt: 1,
       exitedAt: null,
-      lastSeq: 2,
+      lastSeq: 0, // stale: meta is not rewritten per record
     };
     fs.writeFileSync(path.join(orphan, 'meta.json'), JSON.stringify(record));
     fs.writeFileSync(
@@ -728,8 +980,9 @@ describe('daemon restart', () => {
         id: 'orphan',
         state: 'exited',
         exitReason: 'daemon-restart',
-        pid: null,
+        pid: 12345,
         exitCode: null,
+        lastSeq: 2,
       });
       expect(typeof w.sessions[0].exitedAt).toBe('number');
       const attached = await c.request<any>({

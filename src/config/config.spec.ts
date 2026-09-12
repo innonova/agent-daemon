@@ -38,5 +38,11 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ AGENT_DAEMON_MAX_LINE: '0' })).toThrow(
       'positive',
     );
+    expect(() =>
+      loadConfig({ AGENT_DAEMON_SLOW_CONSUMER_BYTES: 'Infinity' }),
+    ).toThrow('positive');
+    expect(loadConfig({ AGENT_DAEMON_PIPE_GRACE_MS: '50' }).pipeGraceMs).toBe(
+      50,
+    );
   });
 });
