@@ -1,0 +1,19 @@
+# Template; scripts/install-user-service.sh fills in the paths and installs it
+# to ~/.config/systemd/user/agent-daemon.service.
+[Unit]
+Description=agent-daemon: holds headless agent CLI sessions
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@NODE@ @INSTALL_DIR@/dist/main.js
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+Environment=AGENT_DAEMON_LISTEN=127.0.0.1:4267
+Environment=PATH=@PATH@
+# Never let an IDE-descended environment turn Electron-based tools into plain node.
+UnsetEnvironment=ELECTRON_RUN_AS_NODE
+
+[Install]
+WantedBy=default.target

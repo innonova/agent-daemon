@@ -300,22 +300,27 @@ All configuration is by environment variable; there is no config file.
 Intended as a systemd **user** service, because the agents' credentials and
 config live in the user's home directory.
 
-```ini
-[Unit]
-Description=agent-daemon
-
-[Service]
-ExecStart=/usr/bin/node /opt/agent-daemon/dist/main.js
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-Environment=AGENT_DAEMON_LISTEN=127.0.0.1:4267
-
-[Install]
-WantedBy=default.target
+```
+npm run install:service
 ```
 
-Note: `ELECTRON_RUN_AS_NODE` and similar variables leaking from IDE shells
-must not reach the service environment.
+`scripts/install-user-service.sh` builds, copies a production install to
+`~/.local/lib/agent-daemon`, writes default `claude`, `codex` and `copilot`
+profiles if none exist, enables lingering so the service outlives login
+sessions, and installs and starts the unit from
+`systemd/agent-daemon.service`. The unit bakes in the `PATH` of the shell
+that ran the script so the agent CLIs are found, and unsets
+`ELECTRON_RUN_AS_NODE` so an IDE-descended environment cannot turn
+Electron-based tools into plain node.
+
+```
+systemctl --user reload agent-daemon    # re-read profiles (SIGHUP)
+journalctl --user -u agent-daemon -f    # logs
+```
+
+Re-running the install script restarts the service, which ends every
+running session. That is the one operation this daemon is designed to
+make rare.
 
 ## Out of scope
 

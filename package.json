@@ -20,7 +20,8 @@
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
-    "smoke:agents": "node scripts/smoke-agents.mjs"
+    "smoke:agents": "node scripts/smoke-agents.mjs",
+    "install:service": "scripts/install-user-service.sh"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",
