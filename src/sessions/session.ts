@@ -56,6 +56,9 @@ export interface SessionEvents {
   exit: [record: SessionRecord];
 }
 
+/** How long a forced pipe closure waits for readable output to drain. */
+const FORCED_CLOSE_DRAIN_MS = 250;
+
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
@@ -75,6 +78,8 @@ export class Session extends EventEmitter<SessionEvents> {
   private stdinLimit = Infinity;
   private pipeGrace: NodeJS.Timeout | null = null;
   private closePipesOnExit = false;
+  private childExited = false;
+  private closePipes: (() => void) | null = null;
   private metaRetry: NodeJS.Timeout | null = null;
   private writes: Promise<void> = Promise.resolve();
 
@@ -127,8 +132,17 @@ export class Session extends EventEmitter<SessionEvents> {
       session.log = new SessionLog(session.logPath, session.index);
       session.writeMeta();
     } catch (err) {
-      session.log?.close();
-      fs.rmSync(dir, { recursive: true, force: true });
+      // Best-effort cleanup; the original failure is what the client hears.
+      try {
+        session.log?.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
       throw new SessionError(
         'storage-error',
         `cannot create session on disk: ${(err as Error).message}`,
@@ -200,10 +214,23 @@ export class Session extends EventEmitter<SessionEvents> {
     // 'exit' fires when the process is gone; 'close' when its stdio has also
     // ended. A descendant that inherited the pipes can hold them open, so
     // after a grace period we destroy the streams ourselves.
-    child.on('exit', () => {
-      if (this.closePipesOnExit) {
+    // Forced closure: whatever is still readable is drained for a short,
+    // bounded time, then both splitters are flushed so a trailing partial
+    // line (or an overflow total) is not lost, and the streams are destroyed.
+    this.closePipes = () => {
+      if (this.pipeGrace) clearTimeout(this.pipeGrace);
+      this.pipeGrace = setTimeout(() => {
+        this.pipeGrace = null;
+        out.flush();
+        err.flush();
         child.stdout?.destroy();
         child.stderr?.destroy();
+      }, FORCED_CLOSE_DRAIN_MS);
+    };
+    child.on('exit', () => {
+      this.childExited = true;
+      if (this.closePipesOnExit) {
+        this.closePipes?.();
         return;
       }
       this.pipeGrace = setTimeout(() => {
@@ -211,13 +238,15 @@ export class Session extends EventEmitter<SessionEvents> {
         Session.logger.warn(
           `session ${r.id}: pipes still open ${limits.pipeGraceMs}ms after exit; closing them`,
         );
-        child.stdout?.destroy();
-        child.stderr?.destroy();
+        this.closePipes?.();
       }, limits.pipeGraceMs);
     });
     child.on('close', (code, signal) => {
       if (this.pipeGrace) clearTimeout(this.pipeGrace);
       this.pipeGrace = null;
+      this.closePipes = null;
+      out.flush();
+      err.flush();
       this.finish(
         code,
         signal,
@@ -245,18 +274,19 @@ export class Session extends EventEmitter<SessionEvents> {
     return spawn(r.command, r.args, { cwd: r.cwd, env, stdio });
   }
 
-  private emitRecord(s: LogStream, d: string): void {
+  private emitRecord(s: LogStream, d: string, isNotice = false): void {
     const record: LogRecord = {
       seq: ++this.record.lastSeq,
       t: Date.now(),
       s,
       d,
     };
-    const notice = this.persist(record);
+    const notice = this.persist(record, isNotice);
     this.emit('output', record);
     // Any logging notice follows the record it concerns, so seq order on the
-    // wire matches the order of sequence numbers.
-    if (notice) this.emitRecord('err', notice);
+    // wire matches the order of sequence numbers. A notice never produces a
+    // notice of its own, so a flapping disk costs one notice per real record.
+    if (notice) this.emitRecord('err', notice, true);
   }
 
   /**
@@ -265,17 +295,17 @@ export class Session extends EventEmitter<SessionEvents> {
    * told when logging fails and when it recovers, so they know replay has a
    * hole.
    */
-  private persist(record: LogRecord): string | null {
+  private persist(record: LogRecord, isNotice: boolean): string | null {
     if (!this.log) return null;
     try {
       this.log.append(record);
-      if (this.logFailing) {
+      if (this.logFailing && !isNotice) {
         this.logFailing = false;
         Session.logger.log(`session ${this.record.id}: log writes recovered`);
         return `agent-daemon: log writes recovered; records up to seq ${record.seq - 1} may be missing from replay`;
       }
     } catch (err) {
-      if (!this.logFailing) {
+      if (!this.logFailing && !isNotice) {
         this.logFailing = true;
         Session.logger.error(
           `session ${this.record.id}: log write failed: ${(err as Error).message}`,
@@ -300,7 +330,13 @@ export class Session extends EventEmitter<SessionEvents> {
     r.exitedAt = Date.now();
     this.child = null;
     this.saveMeta();
-    this.log?.close();
+    try {
+      this.log?.close();
+    } catch (err) {
+      Session.logger.error(
+        `session ${r.id}: closing the log failed: ${(err as Error).message}`,
+      );
+    }
     this.log = null;
     this.emit('exit', r);
   }
@@ -365,7 +401,14 @@ export class Session extends EventEmitter<SessionEvents> {
    * before the daemon goes away even if a descendant holds the pipes.
    */
   terminate(sig: NodeJS.Signals): void {
+    if (this.record.state !== 'running') return;
     this.closePipesOnExit = true;
+    if (this.childExited) {
+      // The process is already gone; only the pipes remain. Close them now
+      // instead of waiting out the grace period.
+      this.closePipes?.();
+      return;
+    }
     this.signal(sig);
   }
 
@@ -429,19 +472,24 @@ export class Session extends EventEmitter<SessionEvents> {
     if (this.record.state !== 'exited') {
       throw new SessionError('session-running', 'session is still running');
     }
+    fs.rmSync(this.dir, { recursive: true, force: true });
     if (this.metaRetry) clearTimeout(this.metaRetry);
     this.metaRetry = null;
-    fs.rmSync(this.dir, { recursive: true, force: true });
   }
 
   /** Records `fromSeq..untilSeq` from disk, seeking via the index. */
-  read(fromSeq: number, untilSeq: number): AsyncGenerator<LogRecord> {
+  read(
+    fromSeq: number,
+    untilSeq: number,
+    cancelled?: () => boolean,
+  ): AsyncGenerator<LogRecord> {
     return SessionLog.read(
       this.logPath,
       fromSeq,
       untilSeq,
       this.index.offsetFor(fromSeq),
       this.index,
+      cancelled,
     );
   }
 }

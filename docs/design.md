@@ -255,7 +255,9 @@ Error codes: `malformed`, `unknown-type`, `unsupported-protocol`,
 `unknown-profile`, `unknown-session`, `invalid-id`, `duplicate-id`,
 `invalid-input`, `invalid-signal`, `session-not-running`, `session-running`,
 `stdin-closed`, `stdin-full`, `stdin-error`, `storage-error`,
-`replay-failed`, `cancelled`, `slow-consumer`, `internal`.
+`replay-failed` (including a log that has gone missing), `cancelled`,
+`shutting-down` (no new sessions once shutdown has begun), `slow-consumer`,
+`internal`.
 
 `session.input` replies `ok` only once the bytes have been handed to the
 pipe. An agent that has stopped reading therefore delays the reply; a
@@ -296,7 +298,12 @@ and reattach with replay.
 - The session exits when the child has exited *and* its stdout and stderr
   have closed, so final output is never lost. If a descendant inherited the
   pipes and keeps them open, they are closed `AGENT_DAEMON_PIPE_GRACE_MS`
-  (default 10 s) after the child's exit and the session exits then.
+  (default 10 s) after the child's exit and the session exits then. A forced
+  closure first drains what is readable for a short bounded time and
+  flushes any trailing partial line.
+- Logging notices (write failed / recovered) never generate notices about
+  their own persistence, so a flapping disk costs at most one notice per
+  real record.
 - A single line is limited to 10 MB (`AGENT_DAEMON_MAX_LINE`, bytes). This
   is purely a memory bound against a child that stops emitting newlines; it
   is not expected to trigger with real agents. When exceeded, the buffered
@@ -313,7 +320,9 @@ and reattach with replay.
 - On `SIGTERM`/`SIGINT` the daemon sends `SIGTERM` to every running child,
   waits up to 5 s, sends `SIGKILL` to whatever is left, records the exits,
   drops client connections and exits 0. A hard 15 s limit ends the process
-  regardless. Children are in the daemon's process group but nothing else
+  regardless. Once shutdown has begun, `session.start` is refused with
+  `shutting-down`, and a child that had already exited but whose pipes were
+  still held has them closed at once. Children are in the daemon's process group but nothing else
   ties their lifetime to it: if the daemon is killed with `SIGKILL`, the
   systemd cgroup (the unit's default `KillMode=control-group`) is what ends
   them. Outside systemd, orphans are possible after a hard kill.

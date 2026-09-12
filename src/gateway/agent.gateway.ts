@@ -194,6 +194,9 @@ export class AgentGateway
   ): void {
     this.handle(client, f, async () => {
       const replay = this.parseReplay(f.replay);
+      if (f.attach !== undefined && typeof f.attach !== 'boolean') {
+        throw new SessionError('invalid-request', '"attach" must be a boolean');
+      }
       const session = this.sessions.start(f);
       if (f.attach) {
         const result = await this.attach(client, session.id, replay);
@@ -329,11 +332,11 @@ export class AgentGateway
   // ---- attachment & output ------------------------------------------------
 
   private parseReplay(replay: unknown): ReplayOption {
-    if (replay === undefined || replay === null || replay === false)
-      return false;
+    if (replay === undefined || replay === false) return false;
     if (replay === true) return true;
     if (
       typeof replay === 'object' &&
+      replay !== null &&
       Number.isSafeInteger((replay as { fromSeq?: unknown }).fromSeq)
     ) {
       return { fromSeq: (replay as { fromSeq: number }).fromSeq };
@@ -386,7 +389,7 @@ export class AgentGateway
           attachment.state = 'live';
           return lastSent;
         }
-        for await (const record of session.read(next, target)) {
+        for await (const record of session.read(next, target, () => !alive())) {
           if (!alive()) return null;
           await this.waitForDrain(client, alive);
           if (!alive()) return null;

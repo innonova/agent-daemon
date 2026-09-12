@@ -154,6 +154,8 @@ describe('starting sessions', () => {
     const before = fs.readdirSync(path.join(d.stateDir, 'sessions')).length;
     for (const bad of [
       { profile: 5 },
+      { attach: 'false' },
+      { replay: null },
       { args: 'no' },
       { args: [1] },
       { argsReplace: 'no' },
@@ -491,6 +493,64 @@ describe('input and output', () => {
     await c.waitFor((f) => f.type === 'session.exit' && (f as any).id === id);
   });
 
+  it('acknowledges input only once it reaches the pipe', async () => {
+    const c = await connect();
+    const { id } = await startFake(c);
+    await c.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'pause-stdin', ms: 1500 },
+    });
+    await c.waitForOutput(id, (o) => o?.type === 'paused');
+    // fill the pipe well past the kernel buffer while the agent is not reading
+    const chunk = 'y'.repeat(64 * 1024);
+    const t0 = Date.now();
+    const pending: Promise<any>[] = [];
+    for (let i = 0; i < 6; i++)
+      pending.push(
+        c.request({ type: 'session.input', id, data: chunk }, 20000),
+      );
+    const replies = await Promise.all(pending);
+    expect(replies.every((r) => r.type === 'ok')).toBe(true);
+    // the last one could only complete after the agent resumed reading
+    expect(Date.now() - t0).toBeGreaterThan(1000);
+  });
+
+  it('reports a failed stdin write instead of ok', async () => {
+    const c = await connect();
+    const { id } = await startFake(c);
+    await c.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'close-stdin' },
+    });
+    await c.waitForOutput(id, (o) => o?.type === 'stdin-destroyed');
+    let reply: any;
+    for (let i = 0; i < 20; i++) {
+      reply = await c.request({
+        type: 'session.input',
+        id,
+        data: 'x'.repeat(1024),
+      });
+      if (reply.type === 'error') break;
+      await sleep(20);
+    }
+    expect(reply).toMatchObject({ type: 'error' });
+    expect(['stdin-error', 'stdin-closed']).toContain(reply.code);
+    if (reply.code === 'stdin-error') {
+      expect(
+        c
+          .outputs(id)
+          .some(
+            (f: any) =>
+              f.s === 'err' &&
+              f.d.startsWith('agent-daemon: stdin write failed'),
+          ),
+      ).toBe(true);
+    }
+    await c.request({ type: 'session.signal', id, signal: 'SIGKILL' });
+  });
+
   it('requires data on input and rejects unknown sessions', async () => {
     const c = await connect();
     const { id } = await startFake(c);
@@ -727,6 +787,24 @@ describe('replay', () => {
     await b.waitForOutput(id, (o) => o?.type === 'echo' && o.data === 'still');
   });
 
+  it('fails replay, and stays detached, when the log is gone', async () => {
+    const a = await connect();
+    const { id } = await startFake(a);
+    fs.rmSync(path.join(d.stateDir, 'sessions', id, 'log.ndjson'));
+    const b = await connect();
+    expect(
+      await b.request({ type: 'session.attach', id, replay: true }),
+    ).toMatchObject({ type: 'error', code: 'replay-failed' });
+    await a.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'echo', data: 'x' },
+    });
+    await a.waitForOutput(id, (o) => o?.type === 'echo');
+    await sleep(50);
+    expect(b.outputs(id)).toEqual([]);
+  });
+
   it('replays an exited session from disk', async () => {
     const a = await connect();
     const { id } = await startFake(a);
@@ -817,7 +895,11 @@ describe('lifecycle', () => {
   it('closes pipes a descendant kept open after the child exited', async () => {
     const c = await connect();
     const { id } = await startFake(c);
-    await c.request({ type: 'session.input', id, data: { cmd: 'orphan' } });
+    await c.request({
+      type: 'session.input',
+      id,
+      data: { cmd: 'orphan', partial: 'kept' },
+    });
     const orphaned = JSON.parse(
       (await c.waitForOutput(id, (o) => o?.type === 'orphaned')).d,
     );
@@ -827,6 +909,9 @@ describe('lifecycle', () => {
         5000,
       );
       expect(exit).toMatchObject({ exitCode: 0 });
+      expect(
+        c.outputs(id).some((f: any) => f.s === 'out' && f.d === 'kept'),
+      ).toBe(true);
     } finally {
       try {
         process.kill(orphaned.pid, 'SIGKILL');
@@ -1039,6 +1124,9 @@ describe('daemon restart', () => {
         ),
       );
       expect(meta).toMatchObject({ state: 'exited', signal: 'SIGTERM' });
+      expect(
+        await c.request({ type: 'session.start', profile: 'fake' }),
+      ).toMatchObject({ type: 'error', code: 'shutting-down' });
       await c.close();
     } finally {
       if (orphanPid) {

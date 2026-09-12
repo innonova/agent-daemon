@@ -64,6 +64,7 @@ export class SessionsService
 {
   private readonly logger = new Logger(SessionsService.name);
   private readonly sessions = new Map<string, Session>();
+  private shuttingDown = false;
 
   constructor(
     @Inject(DAEMON_CONFIG) private readonly config: DaemonConfig,
@@ -103,7 +104,7 @@ export class SessionsService
           // sequence boundary from the log itself.
           session.markOrphaned(
             'daemon-restart',
-            Math.max(record.lastSeq, await SessionLog.lastSeq(session.logPath)),
+            Math.max(record.lastSeq, await this.recoverLastSeq(session)),
           );
           orphaned++;
         }
@@ -117,6 +118,27 @@ export class SessionsService
     this.logger.log(
       `restored ${this.sessions.size} session(s) from ${this.dir}, ${orphaned} orphaned`,
     );
+  }
+
+  /**
+   * Reads the real sequence boundary from the log, retrying a few times so
+   * a transient open error at boot does not persist a wrong boundary. If it
+   * keeps failing the meta value is used and the problem is logged.
+   */
+  private async recoverLastSeq(session: Session): Promise<number> {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        return await SessionLog.lastSeq(session.logPath);
+      } catch (err) {
+        lastErr = err;
+        await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+      }
+    }
+    this.logger.error(
+      `session ${session.record.id}: could not read log tail, keeping recorded lastSeq: ${(lastErr as Error).message}`,
+    );
+    return session.record.lastSeq;
   }
 
   list(): SessionRecord[] {
@@ -133,6 +155,8 @@ export class SessionsService
   }
 
   start(req: StartRequest): SessionRecord {
+    if (this.shuttingDown)
+      throw new SessionError('shutting-down', 'the daemon is shutting down');
     validateStartRequest(req);
     const profile = this.profiles.get(req.profile);
     if (!profile)
@@ -195,6 +219,7 @@ export class SessionsService
    * written as exited rather than left for the next start to mark.
    */
   async terminateAll(graceMs = 5000): Promise<void> {
+    this.shuttingDown = true;
     const running = () =>
       [...this.sessions.values()].filter((s) => s.record.state === 'running');
     for (const s of running()) {

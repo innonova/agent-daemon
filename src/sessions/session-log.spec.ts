@@ -53,10 +53,29 @@ describe('SessionLog', () => {
     expect((await collect(file)).map((r) => r.seq)).toEqual([1]);
   });
 
-  it('yields nothing for a missing file', async () => {
-    expect(await collect(path.join(path.dirname(file), 'nope.ndjson'))).toEqual(
-      [],
-    );
+  it('rejects a missing file, but lastSeq treats it as empty', async () => {
+    const missing = path.join(path.dirname(file), 'nope.ndjson');
+    await expect(collect(missing)).rejects.toThrow(/ENOENT/);
+    expect(await SessionLog.lastSeq(missing)).toBe(0);
+  });
+
+  it('stops reading when cancelled', async () => {
+    const log = new SessionLog(file);
+    for (let i = 1; i <= 20000; i++)
+      log.append({ seq: i, t: i, s: 'out', d: 'z'.repeat(100) });
+    log.close();
+    let calls = 0;
+    const out = [];
+    for await (const r of SessionLog.read(
+      file,
+      19990,
+      undefined,
+      0,
+      undefined,
+      () => ++calls > 2,
+    ))
+      out.push(r);
+    expect(out).toEqual([]); // cancelled long before the requested tail
   });
 
   it('stops at untilSeq and resumes from an indexed offset', async () => {

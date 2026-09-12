@@ -102,20 +102,18 @@ export class SessionLog {
     untilSeq = Number.MAX_SAFE_INTEGER,
     offset = 0,
     index?: LogIndex,
+    cancelled: () => boolean = () => false,
   ): AsyncGenerator<LogRecord> {
-    let fh: fsp.FileHandle;
-    try {
-      fh = await fsp.open(path, 'r');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw err;
-    }
+    // A missing file is an error here: every registered session has a log
+    // from the moment it is created, so its absence means history is gone.
+    const fh = await fsp.open(path, 'r');
     try {
       const chunk = Buffer.allocUnsafe(64 * 1024);
       let pending: Buffer[] = [];
       let lineStart = offset;
       let pos = offset;
       for (;;) {
+        if (cancelled()) return;
         const { bytesRead } = await fh.read(chunk, 0, chunk.length, pos);
         if (bytesRead === 0) return;
         let start = 0;
@@ -150,13 +148,17 @@ export class SessionLog {
     }
   }
 
-  /** The seq of the last complete record on disk, or 0. Reads only the tail. */
+  /**
+   * The seq of the last complete record on disk, or 0 if there is no log.
+   * Reads only the tail. Any error other than a missing file propagates.
+   */
   static async lastSeq(path: string): Promise<number> {
     let fh: fsp.FileHandle;
     try {
       fh = await fsp.open(path, 'r');
-    } catch {
-      return 0;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+      throw err;
     }
     try {
       const { size } = await fh.stat();
