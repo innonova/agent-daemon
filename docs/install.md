@@ -154,6 +154,35 @@ Installer overrides, for an unusual layout: `AGENT_DAEMON_INSTALL_DIR`,
 `AGENT_MANAGER_UI_DIST` (manager, also `install:ui`);
 `AGENT_MANAGER_CLI_BIN` (where the `am` wrapper goes).
 
+## 3b. Several machines
+
+Repeat steps 1 to 3 on each machine; each runs its own daemon and
+manager. To work on all of them from one UI, pick one manager as the
+hub. On every other machine (a spoke), install the manager with a
+shared secret, which the installer keeps in the `hub.conf` drop-in:
+
+```
+AGENT_MANAGER_HUB_TOKEN='<long random string>' npm run install:service
+```
+
+The spoke's port 4268 must be reachable from the hub (a LAN or VPN
+address; the spoke needs no TLS front of its own since only the hub
+talks to it, but keep the port off the internet). On the hub, list the
+spokes in `~/.local/state/agent-manager/spokes.json` and restart it:
+
+```
+[{ "name": "vibe", "url": "http://192.168.1.20:4268", "token": "<the same string>" }]
+systemctl --user restart agent-manager
+```
+
+The hub's project list now shows every machine's projects with the
+machine's name, and everything about them (agents, transcripts, files,
+changes, features) works through the hub as the user logged in there,
+who is created on the spoke by name. The agent CLIs must be installed
+and logged in on each machine that runs agents; a spoke without them
+can still run the `fake` profile. `../agent-manager/docs/design.md`
+(Hub and spokes) has the details and the limits.
+
 ## 4. Upgrade
 
 ```
