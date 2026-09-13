@@ -9,6 +9,8 @@ between the process and websocket clients, and appends every line to a log
 on disk so a client can reattach and replay. It never parses what the agents
 say.
 
+Installing all four parts together: [docs/install.md](docs/install.md).
+
 ## Quickstart
 
 ```
