@@ -63,9 +63,8 @@ primary) and an agent in it.
 - **More users**: `cd ~/projects/agent-manager && npm run user:add -- alice`
   prints a generated password once. Every user is a trusted admin; the
   web UI's Users page renames, resets and removes.
-- **Profiles**: `~/.config/agent-daemon/profiles/<name>.json` is the
-  command and arguments for one agent CLI. Edit, then
-  `systemctl --user reload agent-daemon`; running sessions are untouched.
+- **Profiles**: how the daemon starts each kind of agent; see the next
+  section.
 - **Behind TLS** (a reverse proxy in front of `:4268`): set
   `AGENT_MANAGER_PUBLIC_ORIGIN` and `AGENT_MANAGER_TRUSTED_PROXIES` in a
   systemd drop-in, and keep the proxy's idle timeout above the manager's
@@ -79,6 +78,59 @@ primary) and an agent in it.
   the commands. Shift+Enter inserts a newline where the terminal sends a
   distinct key for it (Git Bash does; Windows Terminal needs one binding,
   see the CLI README); Ctrl+J works everywhere.
+
+## 3a. Profiles
+
+A profile is one JSON file in `~/.config/agent-daemon/profiles/`, named
+after the agent it starts, saying how to run that agent CLI headless.
+The daemon's installer writes `claude`, `codex` and `copilot` if they do
+not exist; the manager's installer writes `fake`. The installed set:
+
+```
+claude.json   claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --replay-user-messages
+codex.json    codex app-server
+copilot.json  copilot --acp
+fake.json     node ~/.local/lib/agent-manager/fixtures/fake-agent.mjs   (costs no tokens; for trying things)
+```
+
+The fields, all but `command` optional:
+
+```json
+{
+  "description": "Claude Code, headless stream-json",
+  "command": "claude",
+  "args": ["-p", "--input-format", "stream-json", "…"],
+  "cwd": null,
+  "env": {},
+  "loginShell": false
+}
+```
+
+- `command` is resolved against the daemon service's PATH, which the
+  installer copies from the shell that ran it. An agent CLI installed
+  later, or one that only works with your shell profile loaded (nvm,
+  tokens in `.bashrc`), needs either `loginShell: true`, which runs the
+  command through `$SHELL -lc`, or a reinstall of the daemon from a
+  shell that has it on the PATH (that restart ends every session).
+- `args` are the base arguments; the manager appends its own per agent
+  (the working directory's extra repositories, permission mode, model,
+  effort, resume), so keep the protocol flags and add only what applies
+  to every agent of that kind.
+- `env` is merged over the daemon's environment, per profile.
+
+Two rules that follow from how the pieces fit:
+
+- **The name is the contract.** The manager has one adapter per vendor
+  protocol, keyed by profile name: `claude`, `codex`, `copilot`, `fake`.
+  The web UI's "new agent" only offers profiles the manager supports, so
+  a profile under another name is listed but unusable. A variant (a
+  different model, a different working setup) is an agent setting, not
+  a new profile.
+- **Edits take effect on reload, not on running agents**:
+  `systemctl --user reload agent-daemon`. Sessions already started keep
+  the command they were started with; the next session an agent starts
+  (after a stop, or "save and restart agents" in the project form) uses
+  the new profile.
 
 ## 4. Upgrade
 
