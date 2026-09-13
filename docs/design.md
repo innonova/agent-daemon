@@ -26,8 +26,8 @@ running on the same machine.
    change.
 3. **It is not agent-specific.** Session ids, resume flags, permission
    handling and models are all just arguments and lines to the daemon.
-4. **It is local and trusted.** It binds to loopback (or a unix socket) with
-   no authentication, and spawns whatever the client asks for. Hardening is
+4. **It is local and trusted.** It binds to loopback TCP with no
+   authentication, and spawns whatever the client asks for. Hardening is
    explicitly out of scope; it is not public facing.
 5. **Minimal dependencies.** Node, NestJS (chosen for familiarity, not
    necessity), a websocket library. Nothing else unless unavoidable.
@@ -403,6 +403,14 @@ make rare.
 Authentication, TLS, remote access, one-shot command execution, filesystem
 browsing, session retention policies, PTY sessions, any parsing of agent
 output. These belong to the services and UIs built on top.
+
+## Process management
+
+The user service unit has `Restart=on-failure` with `RestartSec=2`: a
+crash brings the daemon back within two seconds, with every session it
+held recorded as exited for reason `daemon-restart`; nothing resumes by
+itself, the clients decide (the manager resumes an agent on its next
+turn). A clean stop or a reload never restarts anything.
 
 ## Resolved questions
 

@@ -13,8 +13,11 @@ runs as systemd user services under `~/.local/lib`, with config in
 
 ## 1. Prerequisites
 
-- Linux with systemd user services (`loginctl enable-linger` is done by
-  the daemon's installer so the services outlive your login).
+- Linux with systemd user services. The daemon's installer runs
+  `loginctl enable-linger` so the services outlive your login; over a
+  plain SSH session on a host with strict polkit it can fail, in which
+  case the installer prints a warning and both services stop at logout
+  until you run it with a privilege that works.
 - Node 24 and git.
 - The agent CLIs you want, installed and logged in **as this user**:
   Claude Code (`claude`), Codex (`codex`), GitHub Copilot CLI (`copilot`).
@@ -52,7 +55,10 @@ What each step does:
   tokens, for trying things), reloads the daemon's profiles (a reload,
   not a restart), starts the `agent-manager` user service on `:4268`, and
   creates the `admin` user with the password given.
-- **cli**: builds and links `~/.local/bin/am`.
+- **cli**: builds `dist/` in the checkout and writes `~/.local/bin/am`,
+  a wrapper that runs it from there. `~/.local/bin` must be on your
+  PATH; moving or deleting the checkout breaks the command, and a
+  `npm run build` in the checkout changes the installed command at once.
 
 Then open `http://<host>:4268/`, log in as `admin`, and create a project
 (a name and the absolute paths of its repositories, the first one
@@ -60,9 +66,18 @@ primary) and an agent in it.
 
 ## 3. Configure
 
-- **More users**: `cd ~/projects/agent-manager && npm run user:add -- alice`
-  prints a generated password once. Every user is a trusted admin; the
-  web UI's Users page renames, resets and removes.
+- **More users**: the web UI's Users page creates one with a generated
+  password shown once, and renames, resets and removes. From the shell,
+  `cd ~/projects/agent-manager && npm run user:add -- alice` asks for a
+  password (or takes `AGENT_MANAGER_NEW_PASSWORD`). Every user is a
+  trusted admin.
+- **The admin password**: `AGENT_MANAGER_ADMIN_PASSWORD` creates `admin`
+  on the first start only, when no user exists; giving another value on
+  a reinstall changes nothing (reset it from the Users page instead).
+  The installer stores it, when given, in
+  `~/.config/systemd/user/agent-manager.service.d/admin.conf` (mode 600),
+  in the clear; remove that file after the first start if you would
+  rather not keep it, the manager does not need it again.
 - **Profiles**: how the daemon starts each kind of agent; see the next
   section.
 - **Behind TLS** (a reverse proxy in front of `:4268`): set
@@ -70,12 +85,14 @@ primary) and an agent in it.
   systemd drop-in, and keep the proxy's idle timeout above the manager's
   websocket ping interval. The manager README's "Behind a reverse proxy"
   section has the drop-in and an nginx example; the installer leaves
-  drop-ins alone.
+  `proxy.conf` alone (it rewrites only `admin.conf`, and only when the
+  variable is set).
 - **Other settings**: environment variables in the same drop-in; the
   tables are in `agent-daemon/docs/design.md` and
   `agent-manager/docs/design.md` (Configuration).
-- **The CLI**: `am login` once, then `am` for the TUI or `am help` for
-  the commands. Shift+Enter inserts a newline where the terminal sends a
+- **The CLI**: `am login`, then `am` for the TUI or `am help` for the
+  commands. A login lasts `AGENT_MANAGER_SESSION_TTL_MS` (30 days); after
+  that every command says to log in again. Shift+Enter inserts a newline where the terminal sends a
   distinct key for it (Git Bash does; Windows Terminal needs one binding,
   see the CLI README); Ctrl+J works everywhere.
 
@@ -132,6 +149,11 @@ Two rules that follow from how the pieces fit:
   (after a stop, or "save and restart agents" in the project form) uses
   the new profile.
 
+Installer overrides, for an unusual layout: `AGENT_DAEMON_INSTALL_DIR`,
+`AGENT_DAEMON_CONFIG_DIR` (daemon); `AGENT_MANAGER_INSTALL_DIR`,
+`AGENT_MANAGER_UI_DIST` (manager, also `install:ui`);
+`AGENT_MANAGER_CLI_BIN` (where the `am` wrapper goes).
+
 ## 4. Upgrade
 
 ```
@@ -159,7 +181,7 @@ on the next turn afterwards, but a turn in flight is cut.
 | services | `systemctl --user status agent-daemon agent-manager`; logs with `journalctl --user -u <name> -f` |
 | daemon profiles and state | `~/.config/agent-daemon/profiles/`, `~/.local/state/agent-daemon/sessions/<id>/` (the logs of record) |
 | manager database and cache | `~/.local/state/agent-manager/` (`manager.db`, `transcripts/`) |
-| manager overrides | `~/.config/systemd/user/agent-manager.service.d/*.conf` |
+| manager overrides | `~/.config/systemd/user/agent-manager.service.d/*.conf` (`admin.conf` holds the first-start password in the clear) |
 | CLI login | `~/.config/agent-manager-cli/session.json` |
 
 Backups: the daemon's state directory and the manager's database are the
