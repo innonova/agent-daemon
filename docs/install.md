@@ -84,8 +84,10 @@ primary) and an agent in it.
   start saying it runs under agent-manager (nobody at a terminal, what a
   mid-turn message is, the features convention, its project and repos).
   The shipped text is `agent-manager/harness.md`; the installer copies
-  it to `~/.config/agent-manager/harness.md` on the first install and
-  leaves your edits alone afterwards (it says when the two differ).
+  it to `~/.config/agent-manager/harness.md` on the first install, and
+  on later installs replaces that copy only while you have not edited
+  it (a copy that still equals the previously shipped text follows the
+  new one; an edited copy is kept, and the installer says so).
   Edit that copy (placeholders `{{agent}}`, `{{project}}`, `{{host}}`,
   `{{repos}}`, `{{cwd}}`, `{{permissions}}`; an empty file turns the
   note off). It is read at each session start, so an edit reaches an
