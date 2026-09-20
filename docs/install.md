@@ -80,6 +80,17 @@ primary) and an agent in it.
   rather not keep it, the manager does not need it again.
 - **Profiles**: how the daemon starts each kind of agent; see the next
   section.
+- **What agents are told**: every agent gets a short note at session
+  start saying it runs under agent-manager (nobody at a terminal, what a
+  mid-turn message is, the features convention, its project and repos).
+  The built-in text is in `agent-manager/src/agents/harness.ts`; put
+  your own in `~/.config/agent-manager/harness.md` (placeholders
+  `{{agent}}`, `{{project}}`, `{{host}}`, `{{repos}}`, `{{cwd}}`,
+  `{{permissions}}`; an empty file turns the note off). It is read at
+  each session start, so an edit reaches an agent at its next restart
+  ("save and restart agents" on the project, or `am project restart`).
+  Each machine has its own file. The web UI shows what an agent was
+  told behind "harness" in its header.
 - **Behind TLS** (a reverse proxy in front of `:4268`): set
   `AGENT_MANAGER_PUBLIC_ORIGIN` and `AGENT_MANAGER_TRUSTED_PROXIES` in a
   systemd drop-in, and keep the proxy's idle timeout above the manager's
