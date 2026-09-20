@@ -83,12 +83,14 @@ primary) and an agent in it.
 - **What agents are told**: every agent gets a short note at session
   start saying it runs under agent-manager (nobody at a terminal, what a
   mid-turn message is, the features convention, its project and repos).
-  The built-in text is in `agent-manager/src/agents/harness.ts`; put
-  your own in `~/.config/agent-manager/harness.md` (placeholders
-  `{{agent}}`, `{{project}}`, `{{host}}`, `{{repos}}`, `{{cwd}}`,
-  `{{permissions}}`; an empty file turns the note off). It is read at
-  each session start, so an edit reaches an agent at its next restart
-  ("save and restart agents" on the project, or `am project restart`).
+  The shipped text is `agent-manager/harness.md`; the installer copies
+  it to `~/.config/agent-manager/harness.md` on the first install and
+  leaves your edits alone afterwards (it says when the two differ).
+  Edit that copy (placeholders `{{agent}}`, `{{project}}`, `{{host}}`,
+  `{{repos}}`, `{{cwd}}`, `{{permissions}}`; an empty file turns the
+  note off). It is read at each session start, so an edit reaches an
+  agent at its next restart ("save and restart agents" on the project,
+  or `am project restart`).
   Each machine has its own file, and the projects page's "Harness note"
   block edits it from the web UI (a hub edits its spokes' too). The web
   UI shows what an agent was told behind "harness" in its header.
