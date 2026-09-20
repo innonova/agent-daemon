@@ -117,7 +117,9 @@ with caveats. When asked:
   sections are the feature's history and the human's answers to it;
 - set `status: in-progress` when you start;
 - when finished, append `## Report (YYYY-MM-DD)` with what you changed,
-  what you verified and what you left open, and set `status: review`;
+  what you verified, what you left open, and what you noticed and left
+  alone (anything seen outside the feature's scope: a defect, a doubt,
+  a claim you could not check), and set `status: review`;
   if you cannot or should not continue, say why in the report and set
   `status: blocked`;
 - commit the file with the work; never edit the other frontmatter
@@ -129,7 +131,9 @@ with caveats. When asked:
 
 The human reads the report in the manager, answers under `## Response`
 and sets the status back to `planned`, or marks it `done`. The
-convention is specified in `../agent-manager/docs/design.md` (Features).
+convention is specified in `../agent-manager/docs/design.md` (Features);
+the practice around it, including how agents delegate to helpers, is
+`../agent-manager/docs/method.md`.
 
 ## Local environment
 
