@@ -133,7 +133,8 @@ The human reads the report in the manager, answers under `## Response`
 and sets the status back to `planned`, or marks it `done`. The
 convention is specified in `../agent-manager/docs/design.md` (Features);
 the practice around it, including how agents delegate to helpers, is
-`../agent-manager/method.md` (what `am method` prints).
+`../agent-manager/method.md` (what `am method` prints), and how to
+write a feature or a brief is `../agent-manager/framing.md` (`am framing`).
 
 ## Local environment
 
