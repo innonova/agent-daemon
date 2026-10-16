@@ -19,6 +19,11 @@ runs as systemd user services under `~/.local/lib`, with config in
   case the installer prints a warning and both services stop at logout
   until you run it with a privilege that works.
 - Node 24 and git.
+- Memory for the agents you run at once: a Claude session can pass 2 GB
+  resident, and the box has no say in how many a project starts. Without
+  swap the kernel kills the largest one when memory runs out; the unit's
+  `OOMPolicy=continue` keeps that to the one session. Some swap is a
+  cheap cushion against taking the box's other work down with it.
 - The agent CLIs you want, installed and logged in **as this user**:
   Claude Code (`claude`), Codex (`codex`), GitHub Copilot CLI (`copilot`).
   Try each once by hand; the daemon only runs what already works.

@@ -10,6 +10,11 @@ ExecStart=@NODE@ @INSTALL_DIR@/dist/main.js
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
+# The agent CLIs are children in this unit's cgroup. When the kernel's OOM
+# killer takes one of them, systemd's default (stop) would end the whole
+# unit and with it every other session; continue lets that one session
+# exit and the rest carry on. The daemon itself dying still restarts.
+OOMPolicy=continue
 Environment=AGENT_DAEMON_LISTEN=127.0.0.1:4267
 Environment=PATH=@PATH@
 # Never let an IDE-descended environment turn Electron-based tools into plain node.

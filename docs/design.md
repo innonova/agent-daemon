@@ -412,6 +412,15 @@ held recorded as exited for reason `daemon-restart`; nothing resumes by
 itself, the clients decide (the manager resumes an agent on its next
 turn). A clean stop or a reload never restarts anything.
 
+The unit also sets `OOMPolicy=continue`. The agent CLIs run as children
+in the unit's cgroup, and a Claude session can grow past 2 GB resident;
+on a box without swap the kernel's OOM killer takes the largest process,
+and systemd's default policy (`stop`) then ends the whole unit, every
+session exiting with code 143 as if the daemon had been stopped (seen
+2026-10-16: one 2.6 GB process killed, six sessions ended). With
+`continue`, that one session exits with `SIGKILL` and the others carry
+on; the daemon's own death still restarts the unit as above.
+
 ## Resolved questions
 
 - Port 4267, TCP on loopback. No unix socket: TCP is uniform for every
