@@ -23,7 +23,10 @@ runs as systemd user services under `~/.local/lib`, with config in
   resident, and the box has no say in how many a project starts. Without
   swap the kernel kills the largest one when memory runs out; the unit's
   `OOMPolicy=continue` keeps that to the one session. Some swap is a
-  cheap cushion against taking the box's other work down with it.
+  cheap cushion against taking the box's other work down with it: a file
+  on the root filesystem is enough (`fallocate -l 8G /swapfile`, `chmod
+  600`, `mkswap`, `swapon`, a line in `/etc/fstab`), with
+  `vm.swappiness=10` so it is reached for under pressure, not lived on.
 - The agent CLIs you want, installed and logged in **as this user**:
   Claude Code (`claude`), Codex (`codex`), GitHub Copilot CLI (`copilot`).
   Try each once by hand; the daemon only runs what already works.
