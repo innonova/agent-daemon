@@ -20,6 +20,15 @@ describe('ProfilesService', () => {
     });
   });
 
+  it('loads a profile file that starts with a byte-order mark', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'profiles', 'bom.json'),
+      '\uFEFF{ "command": "x" }',
+    );
+    await svc.reload();
+    expect(svc.get('bom')?.command).toBe('x');
+  });
+
   it('never lets an older reload overwrite a newer one', async () => {
     const write = (args: string[]) =>
       fs.writeFileSync(

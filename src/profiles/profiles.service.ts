@@ -75,7 +75,10 @@ export class ProfilesService implements OnModuleInit {
     for (const entry of entries) {
       const file = path.join(this.dir, entry);
       try {
-        const raw: unknown = JSON.parse(await fs.readFile(file, 'utf8'));
+        // a byte-order mark (Windows editors and PowerShell write one) is not JSON
+        const raw: unknown = JSON.parse(
+          (await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''),
+        );
         const profile = parseProfile(raw, file, path.basename(entry, '.json'));
         if (next.has(profile.name)) {
           this.logger.warn(

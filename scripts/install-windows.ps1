@@ -29,7 +29,8 @@ try { npm ci --omit=dev --ignore-scripts | Out-Null } finally { Pop-Location }
 
 function Write-Profile($name, $json) {
   $f = Join-Path $Config "profiles\$name.json"
-  if (-not (Test-Path $f)) { Write-Host "writing default profile $f"; Set-Content -Path $f -Value $json -Encoding UTF8 }
+  # UTF-8 without a byte-order mark: Set-Content -Encoding UTF8 writes one, which is not JSON
+  if (-not (Test-Path $f)) { Write-Host "writing default profile $f"; [IO.File]::WriteAllText($f, $json, (New-Object Text.UTF8Encoding $false)) }
 }
 Write-Profile claude '{
   "description": "Claude Code, headless stream-json",
