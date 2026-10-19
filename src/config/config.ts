@@ -22,9 +22,29 @@ export const DAEMON_CONFIG = Symbol('DAEMON_CONFIG');
 
 export const PROTOCOL_VERSION = 1;
 
-function xdg(envName: string, fallback: string): string {
-  const v = process.env[envName];
-  return v && v.length > 0 ? v : path.join(os.homedir(), fallback);
+/**
+ * Where config and state live by default: the XDG dirs on Linux and macOS,
+ * and on Windows the profile's Roaming (config) and Local (state) AppData,
+ * which is where a per-user service keeps its files there.
+ */
+export function defaultDir(
+  env: NodeJS.ProcessEnv,
+  kind: 'config' | 'state',
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === 'win32') {
+    const base =
+      kind === 'config'
+        ? env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming')
+        : env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(base, 'agent-daemon');
+  }
+  const xdg = kind === 'config' ? env.XDG_CONFIG_HOME : env.XDG_STATE_HOME;
+  const fallback = kind === 'config' ? '.config' : '.local/state';
+  return path.join(
+    xdg && xdg.length > 0 ? xdg : path.join(os.homedir(), fallback),
+    'agent-daemon',
+  );
 }
 
 function positiveInt(
@@ -38,7 +58,10 @@ function positiveInt(
   return n;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
+export function loadConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): DaemonConfig {
   const listen = env.AGENT_DAEMON_LISTEN ?? '127.0.0.1:4267';
   const idx = listen.lastIndexOf(':');
   const host = idx >= 0 ? listen.slice(0, idx) : '127.0.0.1';
@@ -50,11 +73,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DaemonConfig {
     host: host || '127.0.0.1',
     port,
     configDir:
-      env.AGENT_DAEMON_CONFIG_DIR ??
-      path.join(xdg('XDG_CONFIG_HOME', '.config'), 'agent-daemon'),
-    stateDir:
-      env.AGENT_DAEMON_STATE_DIR ??
-      path.join(xdg('XDG_STATE_HOME', '.local/state'), 'agent-daemon'),
+      env.AGENT_DAEMON_CONFIG_DIR ?? defaultDir(env, 'config', platform),
+    stateDir: env.AGENT_DAEMON_STATE_DIR ?? defaultDir(env, 'state', platform),
     maxLineBytes: positiveInt(
       'AGENT_DAEMON_MAX_LINE',
       env.AGENT_DAEMON_MAX_LINE,

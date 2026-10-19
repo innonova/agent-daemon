@@ -10,6 +10,23 @@ describe('loadConfig', () => {
     expect(c.stateDir.endsWith('/.local/state/agent-daemon')).toBe(true);
   });
 
+  it('keeps config in Roaming and state in Local AppData on Windows', () => {
+    const c = loadConfig(
+      {
+        APPDATA: 'C:\\U\\AppData\\Roaming',
+        LOCALAPPDATA: 'C:\\U\\AppData\\Local',
+      },
+      'win32',
+    );
+    expect(c.configDir.endsWith('agent-daemon')).toBe(true);
+    expect(c.configDir.startsWith('C:\\U\\AppData\\Roaming')).toBe(true);
+    expect(c.stateDir.startsWith('C:\\U\\AppData\\Local')).toBe(true);
+    // an explicit dir wins on any platform
+    expect(
+      loadConfig({ AGENT_DAEMON_STATE_DIR: 'D:\\d' }, 'win32').stateDir,
+    ).toBe('D:\\d');
+  });
+
   it('parses AGENT_DAEMON_LISTEN', () => {
     expect(loadConfig({ AGENT_DAEMON_LISTEN: '0.0.0.0:80' })).toMatchObject({
       host: '0.0.0.0',

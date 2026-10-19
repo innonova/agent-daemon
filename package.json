@@ -22,7 +22,8 @@
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
     "smoke:agents": "node scripts/smoke-agents.mjs",
     "install:service": "scripts/install-user-service.sh",
-    "pretest:e2e": "nest build"
+    "pretest:e2e": "nest build",
+    "install:windows": "powershell -ExecutionPolicy Bypass -File scripts/install-windows.ps1"
   },
   "dependencies": {
     "@nestjs/common": "^12.0.1",

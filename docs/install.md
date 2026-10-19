@@ -207,6 +207,40 @@ and logged in on each machine that runs agents; a spoke without them
 can still run the `fake` profile. `../agent-manager/docs/design.md`
 (Hub and spokes) has the details and the limits.
 
+## 3c. A spoke on Windows
+
+The point of a Windows spoke is the desktop: an SSH session on Windows
+lands in session 0 with no desktop, so an agent started from it cannot
+drive dialogs, Electron windows or screenshots. The daemon is therefore
+installed as a scheduled task that runs at the user's logon, in the
+interactive session, and its agents inherit that session. The user has
+to be logged on at the console for the task to run (on a VM, auto-logon
+keeps the desktop session up across reboots).
+
+Prerequisites: Node 24 and git on PATH, the agent CLIs installed and
+logged in as that user (Claude Code's native installer puts `claude.exe`
+in `%USERPROFILE%\.local\bin`; an npm-installed `.cmd` shim cannot be
+spawned without a shell and is not supported). Then, from a PowerShell
+as that user, in checkouts of the three repositories side by side:
+
+```
+cd agent-daemon      ; npm ci ; npm run install:windows
+cd ..\agent-manager-ui ; npm ci ; npm run build
+cd ..\agent-manager   ; npm ci ; powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 `
+                          -AdminPassword 'choose one' -HubToken '<shared secret>' -HostName win
+```
+
+Each installer builds, copies to `%LOCALAPPDATA%\agent-daemon\lib` or
+`%LOCALAPPDATA%\agent-manager\lib`, registers the task (`agent-daemon`,
+`agent-manager`; `Get-ScheduledTask` lists them, `Start-ScheduledTask`
+and `Stop-ScheduledTask` drive them) and starts it if the user is logged
+on. Config lives in `%APPDATA%` (the daemon's profiles, the manager's
+four texts) and state in `%LOCALAPPDATA%` (session logs, the database);
+each task's stdout goes to a `.log` beside the state. The manager's
+installer opens its port in the Windows firewall when run as an
+administrator. The settings are in `lib\env.cmd`, readable by that user
+only. The hub side is as in 3b: the spoke's address in `spokes.json`.
+
 ## 4. Upgrade
 
 ```
