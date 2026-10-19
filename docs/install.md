@@ -228,7 +228,12 @@ cd agent-daemon      ; npm ci ; npm run install:windows
 cd ..\agent-manager-ui ; npm ci ; npm run build
 cd ..\agent-manager   ; npm ci ; powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 `
                           -AdminPassword 'choose one' -HubToken '<shared secret>' -HostName win
+cd ..\agent-manager-cli ; npm ci ; npm run install:windows
 ```
+
+The last line puts `am` on the user's PATH, so an agent that runs
+there (an agent of a hub project with this machine as its host) can
+hold, learn and list like any other.
 
 Each installer builds, copies to `%LOCALAPPDATA%\agent-daemon\lib` or
 `%LOCALAPPDATA%\agent-manager\lib`, registers the task (`agent-daemon`,
@@ -239,7 +244,12 @@ four texts) and state in `%LOCALAPPDATA%` (session logs, the database);
 each task's stdout goes to a `.log` beside the state. The manager's
 installer opens its port in the Windows firewall when run as an
 administrator. The settings are in `lib\env.cmd`, readable by that user
-only. The hub side is as in 3b: the spoke's address in `spokes.json`.
+only. The hub side is as in 3b: the spoke's address in `spokes.json`,
+and `AGENT_MANAGER_AGENT_URL` on the hub set to an address this machine
+reaches, so an agent here finds its way back. For the desktop session to
+survive a reboot, enable auto-logon; the Sysinternals Autologon tool
+keeps the password as an LSA secret rather than in the registry in the
+clear.
 
 ## 4. Upgrade
 
