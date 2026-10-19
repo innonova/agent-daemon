@@ -18,14 +18,23 @@ $Task   = 'agent-daemon'
 
 Write-Host "building in $Root"
 Push-Location $Root
-try { npm run build | Out-Null } finally { Pop-Location }
+try { npm run build | Out-Null; if ($LASTEXITCODE) { throw "npm run build failed ($LASTEXITCODE)" } } finally { Pop-Location }
+
+# Stop a running install first: Windows will not let npm replace files a
+# process holds open, and a half-replaced node_modules is worse than none.
+if (Get-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue) {
+  Stop-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue
+  # Windows PowerShell 5 has no CommandLine on Get-Process; WMI has it
+  Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like "*agent-daemon\lib\dist\main.js*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+  Unregister-ScheduledTask -TaskName $Task -Confirm:$false
+}
 
 New-Item -ItemType Directory -Force $Lib, $State, (Join-Path $Config 'profiles') | Out-Null
 Remove-Item -Recurse -Force (Join-Path $Lib 'dist') -ErrorAction SilentlyContinue
 Copy-Item -Recurse (Join-Path $Root 'dist') $Lib
 Copy-Item (Join-Path $Root 'package.json'), (Join-Path $Root 'package-lock.json') $Lib
 Push-Location $Lib
-try { npm ci --omit=dev --ignore-scripts | Out-Null } finally { Pop-Location }
+try { npm ci --omit=dev --ignore-scripts | Out-Null; if ($LASTEXITCODE) { throw "npm ci failed ($LASTEXITCODE)" } } finally { Pop-Location }
 
 function Write-Profile($name, $json) {
   $f = Join-Path $Config "profiles\$name.json"
@@ -67,12 +76,6 @@ $action   = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$Vbs`"" 
 $trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 99 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-if (Get-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue) {
-  Stop-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue
-  # Windows PowerShell 5 has no CommandLine on Get-Process; WMI has it
-  Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like "*agent-daemon\lib\dist\main.js*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-  Unregister-ScheduledTask -TaskName $Task -Confirm:$false
-}
 Register-ScheduledTask -TaskName $Task -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'agent-daemon: holds headless agent CLI sessions (interactive session)' | Out-Null
 Write-Host "registered scheduled task $Task (at logon of $env:USERNAME, interactive)"
 
