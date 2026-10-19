@@ -56,7 +56,7 @@ $Cmd = Join-Path $Lib 'run.cmd'
   '@echo off',
   'set AGENT_DAEMON_LISTEN=127.0.0.1:4267',
   'set ELECTRON_RUN_AS_NODE=',
-  "set PATH=$env:PATH",
+  "set PATH=$env:USERPROFILE\.local\bin;$env:PATH", # where Claude Code's native installer puts claude.exe
   "`"$Node`" `"$Lib\dist\main.js`" >> `"$Log`" 2>&1"
 ) | Set-Content -Path $Cmd -Encoding ASCII
 $Vbs = Join-Path $Lib 'run.vbs'
