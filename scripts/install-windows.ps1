@@ -69,7 +69,8 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) 
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 if (Get-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue) {
   Stop-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue
-  Get-Process node -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*agent-daemon\lib\dist\main.js*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+  # Windows PowerShell 5 has no CommandLine on Get-Process; WMI has it
+  Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like "*agent-daemon\lib\dist\main.js*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Unregister-ScheduledTask -TaskName $Task -Confirm:$false
 }
 Register-ScheduledTask -TaskName $Task -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'agent-daemon: holds headless agent CLI sessions (interactive session)' | Out-Null
