@@ -56,6 +56,11 @@ Write-Profile copilot '{
   "command": "copilot",
   "args": ["--acp"]
 }'
+Write-Profile shell '{
+  "description": "a shell that takes one command as its argument, for the manager''s exec (am exec <host> -- <command>); runs in this session, the logged-in desktop",
+  "command": "powershell.exe",
+  "args": ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+}'
 
 # The task does not inherit this shell's PATH, so bake in the one this
 # script was run with (it must be able to find the agent CLIs). A .vbs

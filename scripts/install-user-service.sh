@@ -42,6 +42,11 @@ write_profile copilot '{
   "command": "copilot",
   "args": ["--acp"]
 }'
+write_profile shell '{
+  "description": "a shell that takes one command as its argument, for the manager'"'"'s exec (am exec <host> -- <command>)",
+  "command": "bash",
+  "args": ["-lc"]
+}'
 
 mkdir -p "$UNIT_DIR"
 # The service does not inherit the interactive shell's PATH, so bake in the
