@@ -217,6 +217,16 @@ interactive session, and its agents inherit that session. The user has
 to be logged on at the console for the task to run (on a VM, auto-logon
 keeps the desktop session up across reboots).
 
+The short way, from the hub: `npm run onboard:windows -- <ssh host>
+<name> [description]` in `agent-manager` copies the four checkouts as
+they are, builds and installs them there, installs Claude Code's
+native build if missing, registers the spoke here with a fresh token
+and reinstalls the hub's manager. The machine needs an OpenSSH server
+with PowerShell as its default shell, Node 24 and git on PATH, and an
+administrator user; the two steps left for a person are printed at the
+end (log on at the console, `claude` login). Re-running updates
+everything and keeps the token. The long way, step by step:
+
 Prerequisites: Node 24 and git on PATH, the agent CLIs installed and
 logged in as that user (Claude Code's native installer puts `claude.exe`
 in `%USERPROFILE%\.local\bin`; an npm-installed `.cmd` shim cannot be
